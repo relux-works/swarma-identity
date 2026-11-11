@@ -1,0 +1,7 @@
+.temp/
+.task-board/
+.DS_Store
+.codex/
+.agents/
+.claude/
+.local/
