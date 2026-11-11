@@ -2,6 +2,7 @@ package facade
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -174,12 +175,40 @@ func TestNetworkAddressProfiles(t *testing.T) {
 	}
 }
 
-// Duplicate/aliased members and invalid JSON refuse before any derivation.
+// Each negative changes an otherwise complete valid request, so missing fields
+// cannot mask duplicate/alias/null/encoding rejection at the public boundary.
 func TestStrictPublicRequest(t *testing.T) {
-	for _, raw := range []string{`{"schema":"x","schema":"x"}`, `{"schema":"x","\u0073chema":"x"}`, `{"Schema":"x"}`, `{"schema":null}`, `{"schema":"x"} {}`, string([]byte{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'})} {
+	b, err := json.Marshal(validDerivation(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := string(b)
+	var control DeriveRequest
+	if DecodeStrict(b, &control) != nil || control.XPub != validDerivation(t).XPub {
+		t.Fatal("complete positive control refused")
+	}
+	for _, raw := range []string{
+		good[:len(good)-1] + `,"schema":"` + DeriveSchema + `"}`,
+		good[:len(good)-1] + `,"\u0073chema":"` + DeriveSchema + `"}`,
+		strings.Replace(good, `"schema":`, `"Schema":`, 1),
+		good[:len(good)-1] + `,"extra":0}`,
+		strings.Replace(good, `"schema":"`+DeriveSchema+`"`, `"schema":null`, 1),
+		good + ` {}`,
+		strings.Replace(good, `"main"`, "\""+string([]byte{0xff})+"\"", 1),
+	} {
 		var req DeriveRequest
 		if DecodeStrict([]byte(raw), &req) == nil {
 			t.Fatal("accepted invalid public request")
+		}
+	}
+}
+
+// Request-array strictness must not remove legitimate JSON-RPC null values from
+// the shared syntax validator; full successful RPC fixtures also use error:null.
+func TestJSONRPCNullMembers(t *testing.T) {
+	for _, raw := range []string{`{"result":null,"error":null,"id":1}`, `{"result":[null,0],"error":null,"id":1}`} {
+		if validateJSON([]byte(raw)) != nil {
+			t.Fatal("legitimate RPC null refused")
 		}
 	}
 }

@@ -53,7 +53,8 @@ func fail(code string) *Failure {
 var errJSON = errors.New("invalid closed JSON object")
 
 // DecodeStrict validates UTF-8, duplicate decoded names, exact schema keys and
-// required member presence before unmarshalling. No input is included in errors.
+// required member presence and non-null array elements before unmarshalling.
+// No input is included in errors.
 func DecodeStrict(raw []byte, dst any) error {
 	if len(raw) > 65536 || !utf8.Valid(raw) {
 		return errJSON
@@ -181,6 +182,32 @@ func validUnicodeEscapes(raw []byte) bool {
 	return true
 }
 
+// Null is forbidden in typed public inputs, including inside index arrays.
+// The shared JSON syntax validator still permits legitimate RPC null values.
+func closedValue(raw []byte, t reflect.Type) error {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return errJSON
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Struct:
+		return closedObject(raw, t)
+	case reflect.Slice:
+		var elements []json.RawMessage
+		if json.Unmarshal(raw, &elements) != nil {
+			return errJSON
+		}
+		for _, element := range elements {
+			if err := closedValue(element, t.Elem()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func closedObject(raw []byte, t reflect.Type) error {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
@@ -214,17 +241,8 @@ func closedObject(raw []byte, t reflect.Type) error {
 			}
 			continue
 		}
-		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-			return errJSON
-		}
-		ft := field.Type
-		for ft.Kind() == reflect.Pointer {
-			ft = ft.Elem()
-		}
-		if ft.Kind() == reflect.Struct {
-			if err := closedObject(value, ft); err != nil {
-				return err
-			}
+		if err := closedValue(value, field.Type); err != nil {
+			return err
 		}
 	}
 	for k := range m {

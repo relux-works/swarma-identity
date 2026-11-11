@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -117,6 +119,83 @@ func TestCLIOnlineDocking(t *testing.T) {
 	}
 	if scans != 1 {
 		t.Fatal("scan replay")
+	}
+}
+
+// Complete public requests preserve every explicit path length and index. A null
+// in any supported position must fail at input decoding (empty network), before
+// selected configuration/credentials are prepared or any fixture RPC is sent.
+func TestCLIExplicitIndexArrays(t *testing.T) {
+	replaceArray := func(t *testing.T, request any, field string, value any) string {
+		t.Helper()
+		b, err := json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(b, &fields); err != nil {
+			t.Fatal(err)
+		}
+		fields[field], err = json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return writeInput(t, fields)
+	}
+	r := validDerivation(t)
+	r.Count = 1
+	for length := 0; length <= 8; length++ {
+		t.Run(fmt.Sprintf("path-length-%d", length), func(t *testing.T) {
+			path := make([]uint32, length)
+			for i := range path {
+				path[i] = uint32(i % 2)
+			}
+			request := replaceArray(t, r, "relative_path", path)
+			e, code, raw := runCLI(t, "address", "derive", "--request", request, "--json")
+			var got struct {
+				Result struct {
+					Addresses []Address `json:"addresses"`
+				} `json:"result"`
+			}
+			if code != 0 || e.Error != nil || json.Unmarshal(raw, &got) != nil || len(got.Result.Addresses) != 1 || !slices.Equal(got.Result.Addresses[0].RelativePath, append(slices.Clone(path), r.Start)) {
+				t.Fatal("valid explicit path changed or refused")
+			}
+			for position := range path {
+				t.Run(fmt.Sprintf("null-at-%d", position), func(t *testing.T) {
+					indices := make([]any, length)
+					for i, index := range path {
+						indices[i] = index
+					}
+					indices[position] = nil
+					request := replaceArray(t, r, "relative_path", indices)
+					e, code, _ := runCLI(t, "address", "derive", "--request", request, "--json")
+					if code != 2 || e.Error.Code != "BAD_INPUT" || e.Network != "" {
+						t.Fatal("null path component was not refused at input decoding")
+					}
+				})
+			}
+		})
+	}
+
+	c, methods, done := nodeFixture(t, "", func() {})
+	defer done()
+	config := writeInput(t, c.config) // watch_wallet is legitimately omitted.
+	scan := ScanRequest{Schema: ScanSchema, Network: r.Network, XPub: r.XPub, Branches: []uint32{0, 1}, Count: 2, AddressType: "p2wpkh"}
+	e, code, _ := runCLI(t, "balance", "watch", "--mode", "utxo-scan", "--config", config, "--request", writeInput(t, scan), "--json")
+	if code != 0 || e.Error != nil || len(*methods) == 0 {
+		t.Fatal("valid scan control refused or fixture not reached")
+	}
+	for position := range scan.Branches {
+		t.Run(fmt.Sprintf("branch-null-at-%d", position), func(t *testing.T) {
+			branches := []any{0, 1}
+			branches[position] = nil
+			request := replaceArray(t, scan, "branches", branches)
+			before := len(*methods)
+			e, code, _ := runCLI(t, "balance", "watch", "--mode", "utxo-scan", "--config", config, "--request", request, "--json")
+			if code != 2 || e.Error.Code != "BAD_INPUT" || e.Network != "" || len(*methods) != before {
+				t.Fatal("null branch reached configuration preparation or RPC")
+			}
+		})
 	}
 }
 
