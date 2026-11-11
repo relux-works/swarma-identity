@@ -1,0 +1,31 @@
+name: macOS validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        id: go
+        with:
+          go-version: '1.25.14'
+          cache: true
+      - name: Test
+        run: GOTOOLCHAIN=local GOMAXPROCS=2 go test -p 1 -parallel 1 ./...
+      - name: Static checks
+        if: ${{ !cancelled() && steps.go.outcome == 'success' }}
+        run: GOTOOLCHAIN=local GOMAXPROCS=2 go vet -p 1 ./...
+      - name: Build
+        if: ${{ !cancelled() && steps.go.outcome == 'success' }}
+        run: |
+          mkdir -p .temp/bin
+          GOTOOLCHAIN=local GOMAXPROCS=2 go build -p 1 -o .temp/bin/swarma-identity ./cmd/swarma-identity

@@ -1,7 +1,13 @@
 .temp/
 .task-board/
 .DS_Store
-.codex/
+.codex/*
+!.codex/skills/
+.codex/skills/*
+!.codex/skills/swarma-identity
 .agents/
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/swarma-identity
 .local/
