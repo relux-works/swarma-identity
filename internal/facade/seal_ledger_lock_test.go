@@ -207,6 +207,8 @@ func TestSealLedgerForeignTempCommit(t *testing.T) {
 // ".<ledger>.tmp-" plus 16 random lower-case hex digits and distinct between
 // writers, and removes it by committing it. Under the lock it removes a stale
 // file matching that exact pattern and leaves every other name untouched.
+// Limit: the near-miss names differ from the stale name by more than letter
+// case, because the default macOS file system is case-insensitive.
 func TestSealLedgerTempOwnership(t *testing.T) {
 	f := newFlow(t, "regtest", "id/landlord-a", "id/landlord-a-agent")
 	a, b, _ := sealFixture(t, f)
@@ -214,7 +216,7 @@ func TestSealLedgerTempOwnership(t *testing.T) {
 	pattern := regexp.MustCompile(`^\.seal-ledger\.json\.tmp-[0-9a-f]{16}$`)
 	stale := filepath.Join(dir, ".seal-ledger.json.tmp-0123456789abcdef")
 	kept := map[string][]byte{}
-	for _, name := range []string{".seal-ledger.json.tmp", ".seal-ledger.json.tmp-0123", ".seal-ledger.json.tmp-0123456789ABCDEF", ".seal-ledger.json.tmp-0123456789abcdef0", "other.json.tmp-0123456789abcdef"} {
+	for _, name := range []string{".seal-ledger.json.tmp", ".seal-ledger.json.tmp-0123", ".seal-ledger.json.tmp-0123456789abcdeg", ".seal-ledger.json.tmp-0123456789abcdef0", "other.json.tmp-0123456789abcdef"} {
 		kept[name] = []byte("not a temporary file of this ledger: " + name)
 		if err := os.WriteFile(filepath.Join(dir, name), kept[name], 0600); err != nil {
 			t.Fatal(err)
