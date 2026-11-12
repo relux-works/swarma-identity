@@ -43,12 +43,16 @@ Scratch output goes to `.temp/`, which Git ignores.
 | Tool | Purpose and exact entry point | Output |
 | --- | --- | --- |
 | Go 1.26.8 | Build: command above. Test: `GOTOOLCHAIN=local GOMAXPROCS=2 go test -p 1 -parallel 1 ./...`. Static checks: `GOTOOLCHAIN=local GOMAXPROCS=2 go vet -p 1 ./...`. | Binary under `.temp/bin/`; redirect logs to `.temp/`. |
-| gofmt | Format: `gofmt -w cmd/swarma-identity internal/facade`. | Updates those source files. |
+| gofmt | Format: `gofmt -w cmd/swarma-identity internal/facade internal/registration`. | Updates those source files. |
 | swarma-identity | Seven commands above; every invocation requires `--json`. | One JSON envelope on stdout; fixed bounded diagnostics on stderr. |
 
 Tests use published public BIP84 vectors and fake loopback RPC fixtures with disposable credentials. They never discover or contact a live node. A pruned-node fixture establishes that the adapter makes no historical-block calls; it does not establish live-node qualification. CI runs serial tests and static checks on macOS.
 
 Nostr tests use pinned public BIP-340 verification vectors, an already-signed neutral kind-0 event and frozen canonical byte/hash fixtures. No signing or key generation is used. Source revisions and fixture limits are recorded in [the fixture notes](internal/facade/testdata/nostr/README.md).
+
+Use a standalone Go distribution for the full suite. The Nostr observer uses standard-library overlays; Go refuses these when its toolchain itself resides beneath `GOMODCACHE`.
+
+The offline Go planner in `internal/registration` constructs PSBTv0 reservation and reveal phases from a fixed public funding transaction, an independently selected account pin and immutable policy. It preserves exact approved value bytes and extracts the social and grant keys through the reveal-building path. Its public Core 28.0 fixtures cover both release modes. Plan construction establishes no chain state, signing, protected receipt provenance or broadcast permission. See [fixture details](internal/registration/testdata/core28/README.md).
 
 ## License
 
