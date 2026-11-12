@@ -2,8 +2,11 @@ package facade
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"reflect"
 	"slices"
@@ -58,6 +61,82 @@ func assertNostrFields(t *testing.T, object, want map[string]any) {
 	t.Helper()
 	if !reflect.DeepEqual(object, want) {
 		t.Fatal("Nostr returned fields differ from independent expected values")
+	}
+}
+
+// Ordinary boundary/encoding fixtures use standard JSON's common escaping
+// subset. Special HTML/separator bytes retain their separate frozen goldens.
+func assertNostrPrepared(t *testing.T, e Envelope, fields map[string]any) {
+	t.Helper()
+	canonical, err := json.Marshal([]any{0, fields["pubkey"], fields["created_at"], fields["kind"], fields["tags"], fields["content"]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := sha256.Sum256(canonical)
+	event := map[string]any{"id": hex.EncodeToString(id[:])}
+	for _, key := range []string{"pubkey", "created_at", "kind", "tags", "content"} {
+		event[key] = fields[key]
+	}
+	want := map[string]any{"schema": "swarma-identity/nostr-profile-prepared/1", "canonical_utf8": string(canonical), "event": event}
+	assertNostrSuccess(t, e, "nostr profile-prepare", want)
+}
+
+func assertNostrVerified(t *testing.T, e Envelope, event map[string]any) {
+	t.Helper()
+	assertNostrSuccess(t, e, "nostr profile-verify", map[string]any{"schema": "swarma-identity/nostr-profile-verified/1", "valid": true, "id": event["id"], "pubkey": event["pubkey"], "created_at": event["created_at"], "kind": event["kind"]})
+}
+
+func assertNostrSuccess(t *testing.T, e Envelope, command string, want map[string]any) {
+	t.Helper()
+	if e.Schema != "swarma-identity/result/1" || !e.OK || e.Error != nil || e.Network != "" || e.Command != command {
+		t.Fatal("Nostr success envelope differs from contract")
+	}
+	// Normalize test-owned numeric/slice representations through the transport,
+	// never through product canonicalization or product result construction.
+	var actual, expected map[string]any
+	b, err := json.Marshal(e.Result)
+	w, werr := json.Marshal(want)
+	if err != nil || werr != nil || json.Unmarshal(b, &actual) != nil || json.Unmarshal(w, &expected) != nil {
+		t.Fatal("Nostr expected/result transport")
+	}
+	assertNostrFields(t, actual, expected)
+}
+
+type nostrRefusingWriter struct{ calls int }
+
+func (w *nostrRefusingWriter) Write([]byte) (int, error) {
+	w.calls++
+	return 0, errors.New("controlled stdout refusal")
+}
+
+// For these valid inputs a writer that accepts no bytes causes exactly the
+// literal stderr fallback and exit1. Writable controls still return full data;
+// this does not claim atomicity for writers that accept a partial prefix.
+func TestNostrOutputWriterFailure(t *testing.T) {
+	for _, command := range []string{"profile-prepare", "profile-verify"} {
+		t.Run(command, func(t *testing.T) {
+			event := publicNostrFixture(t)
+			var request any = nostrPrepareInput(event)
+			if command == "profile-verify" {
+				request = map[string]any{"schema": "swarma-identity/nostr-profile-verify/1", "event": event}
+			}
+			args := []string{"nostr", command, "--request", writeInput(t, request), "--json"}
+			e, code, _ := runCLI(t, args...)
+			if code != 0 {
+				t.Fatal("writable positive refused")
+			}
+			if command == "profile-prepare" {
+				assertNostrPrepared(t, e, event)
+			} else {
+				assertNostrVerified(t, e, event)
+			}
+			writer := &nostrRefusingWriter{}
+			var diagnostics bytes.Buffer
+			code = Run(context.Background(), args, writer, &diagnostics)
+			if code != 1 || writer.calls != 1 || diagnostics.String() != "Could not write the result.\n" {
+				t.Fatalf("writer refusal: exit%d writes%d stderr%q", code, writer.calls, diagnostics.String())
+			}
+		})
 	}
 }
 

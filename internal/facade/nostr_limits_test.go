@@ -18,6 +18,8 @@ func checkNostrPrepare(t *testing.T, r map[string]any, want string) Envelope {
 		assertNostrRefusal(t, e, code, want, exit, raw)
 	} else if code != 0 || !e.OK || e.Error != nil || e.Network != "" {
 		t.Fatalf("bounded positive control refused: %d %#v", code, e.Error)
+	} else {
+		assertNostrPrepared(t, e, r)
 	}
 	return e
 }
@@ -44,6 +46,7 @@ func checkNostrBoundary(t *testing.T, r map[string]any, want string) Envelope {
 			if code != 0 || !e.OK {
 				t.Fatal("unchanged signed boundary control refused")
 			}
+			assertNostrVerified(t, e, event)
 			return
 		}
 		exit := 3
@@ -179,6 +182,10 @@ func TestNostrLimits(t *testing.T) {
 						assertNostrRefusal(t, e, code, "BAD_INPUT", 2, b)
 					} else if code != 0 || !e.OK {
 						t.Fatal("exact raw-file limit refused")
+					} else if command == "profile-prepare" {
+						assertNostrPrepared(t, e, event)
+					} else {
+						assertNostrVerified(t, e, event)
 					}
 				})
 			}

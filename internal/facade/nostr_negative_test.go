@@ -158,6 +158,7 @@ func TestNostrStringEncoding(t *testing.T) {
 						} else if code != 0 || !e.OK {
 							t.Fatal("valid string encoding control refused")
 						} else {
+							assertNostrPrepared(t, e, event)
 							ref, _ := json.Marshal([]any{0, event["pubkey"], event["created_at"], event["kind"], event["tags"], event["content"]})
 							var canonical string
 							var prepared map[string]any
