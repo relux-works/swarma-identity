@@ -149,57 +149,85 @@ func TestSealLedgerLockSubstitution(t *testing.T) {
 	}
 }
 
-// Claim: a final sign commits only its own temporary file. When another file,
-// here a complete ledger recording grant C on seal A, is renamed onto the
-// writer's temporary name after it was written and synced and before the
-// commit rename, the sign refuses LEDGER_FILE with no result, so no grant is
-// released for a ledger that does not hold it. Neighbour: with the hook only
-// observing, B issues and the ledger holds A and B.
-// Limit: the swap runs at the ledger's step hook in-process; after the
-// refusal the swapped-in file is the committed ledger, as any replacement by
-// someone with write access to the directory would be.
+// Claim: a final sign commits only its own temporary file, and refusing a
+// foreign one leaves the committed state as it was. Another file, here a
+// complete ledger that omits seal A and records seal B under another grant
+// id, is renamed onto B's temporary name after it was written and synced and
+// before the commit. With a committed ledger holding A, B refuses LEDGER_FILE
+// with no result, the ledger stays byte-identical, no temporary file is left,
+// and a different grant C on A's seal still refuses SEAL_REUSED. On the first
+// record, with no ledger yet, B refuses the same way and no ledger is left
+// behind. Neighbours: with the hook only observing, B issues and the ledger
+// holds every seal; after each refusal B issues once the hook is gone.
+// Limit: the swap runs at the ledger's step hook in-process, not by a racing
+// process at a native syscall boundary.
 func TestSealLedgerForeignTempCommit(t *testing.T) {
-	for _, swap := range []bool{true, false} {
-		f := newFlow(t, "regtest", "id/landlord-a", "id/landlord-a-agent")
-		a, b, _ := sealFixture(t, f)
-		idA := grantIDOf(t, f.signRun(context.Background(), a))
-		foreign := filepath.Join(filepath.Dir(f.ledger), "foreign.json")
-		raw, _ := json.Marshal(sealLedgerFile{SealLedgerSchema, []SealEntry{{sealA, 1, idA}, {sealB, 1, "c0ffee" + idA[6:]}}})
-		if err := os.WriteFile(foreign, raw, 0600); err != nil {
-			t.Fatal(err)
-		}
-		fired := false
-		setLedgerHook(t, func(step string) error {
-			if step != "rename" || fired {
+	for _, tc := range []struct {
+		name        string
+		first, swap bool
+	}{{"recorded-swap", false, true}, {"recorded-stable", false, false}, {"first-swap", true, true}, {"first-stable", true, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFlow(t, "regtest", "id/landlord-a", "id/landlord-a-agent")
+			a, b, c := sealFixture(t, f)
+			idA := ""
+			if !tc.first {
+				idA = grantIDOf(t, f.signRun(context.Background(), a))
+			}
+			other := "c0ffee" + sealA[6:]
+			foreign := filepath.Join(filepath.Dir(f.ledger), "foreign.json")
+			raw, _ := json.Marshal(sealLedgerFile{SealLedgerSchema, []SealEntry{{sealB, 1, other}}})
+			if err := os.WriteFile(foreign, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			before, beforeErr := os.ReadFile(f.ledger)
+			fired := false
+			setLedgerHook(t, func(step string) error {
+				if step != "rename" || fired {
+					return nil
+				}
+				fired = true
+				temps := ledgerTemps(t, f.ledger)
+				if len(temps) != 1 {
+					t.Errorf("want one temporary file, have %v", temps)
+					return nil
+				}
+				if tc.swap {
+					return os.Rename(foreign, filepath.Join(filepath.Dir(f.ledger), temps[0]))
+				}
 				return nil
+			})
+			got := f.signRun(context.Background(), b)
+			ledgerHook = nil
+			if !fired {
+				t.Fatal("hook did not run")
 			}
-			fired = true
-			temps := ledgerTemps(t, f.ledger)
-			if len(temps) != 1 {
-				t.Errorf("want one temporary file, have %v", temps)
-				return nil
+			if tc.swap {
+				if !refusedWith(got, "LEDGER_FILE") {
+					t.Fatalf("committed a temporary file that is not its own: exit %d %+v", got.code, got.envelope.Error)
+				}
+				after, afterErr := os.ReadFile(f.ledger)
+				if tc.first && !os.IsNotExist(afterErr) {
+					t.Fatalf("a refused first record left a ledger: %v", afterErr)
+				}
+				if !tc.first && (beforeErr != nil || afterErr != nil || !bytes.Equal(after, before)) {
+					t.Fatal("a refused foreign commit changed the committed ledger")
+				}
+				if left := ledgerTemps(t, f.ledger); len(left) != 0 {
+					t.Fatalf("a refused foreign commit left temporary files %v", left)
+				}
+				if !tc.first {
+					if reused := f.signRun(context.Background(), c); !refusedWith(reused, "SEAL_REUSED") {
+						t.Fatalf("seal A reusable after a refused foreign commit: exit %d %+v", reused.code, reused.envelope.Error)
+					}
+				}
+				got = f.signRun(context.Background(), b)
 			}
-			if swap {
-				return os.Rename(foreign, filepath.Join(filepath.Dir(f.ledger), temps[0]))
+			idB := grantIDOf(t, got)
+			after := readLedger(t, f.ledger)
+			if !bytes.Contains(after, []byte(idB)) || !bytes.Contains(after, []byte(idA)) || bytes.Contains(after, []byte(other)) {
+				t.Fatal("neighbour: ledger does not hold exactly the issued seals")
 			}
-			return nil
 		})
-		got := f.signRun(context.Background(), b)
-		ledgerHook = nil
-		if !fired {
-			t.Fatal("hook did not run")
-		}
-		if swap {
-			if !refusedWith(got, "LEDGER_FILE") {
-				t.Fatalf("committed a temporary file that is not its own: exit %d %+v", got.code, got.envelope.Error)
-			}
-			continue
-		}
-		idB := grantIDOf(t, got)
-		after := readLedger(t, f.ledger)
-		if !bytes.Contains(after, []byte(idA)) || !bytes.Contains(after, []byte(idB)) {
-			t.Fatal("neighbour: ledger does not hold A and B")
-		}
 	}
 }
 
@@ -435,4 +463,65 @@ func TestSealLedgerMalformedEntries(t *testing.T) {
 	mustRefuse(t, e, code, "SEAL_REUSED")
 	e, code = f.signCmd(b)
 	mustOK(t, e, code)
+}
+
+// Claim: a refused update must not forget a previously committed seal when
+// only the writer's temporary pathname is substituted before its rename.
+// The neighbour performs the same update without substitution. This is an
+// in-process hook-controlled fixture, not native syscall-scheduling evidence.
+func TestReviewPR8ForeignTempKeepsHistory(t *testing.T) {
+	for _, swap := range []bool{false, true} {
+		t.Run(map[bool]string{false: "stable-temp", true: "substituted-temp"}[swap], func(t *testing.T) {
+			f := newFlow(t, "regtest", "id/landlord-a", "id/landlord-a-agent")
+			a, b, c := sealFixture(t, f)
+			idA := grantIDOf(t, f.signRun(context.Background(), a))
+			before := readLedger(t, f.ledger)
+			other := "ab" + idA[2:]
+			if other == idA {
+				other = "cd" + idA[2:]
+			}
+			foreign := filepath.Join(filepath.Dir(f.ledger), "foreign-review.json")
+			raw, _ := json.Marshal(sealLedgerFile{SealLedgerSchema, []SealEntry{{sealB, 1, other}}})
+			if err := os.WriteFile(foreign, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			fired := false
+			setLedgerHook(t, func(step string) error {
+				if step != "rename" || fired {
+					return nil
+				}
+				fired = true
+				if !swap {
+					return nil
+				}
+				names := ledgerTemps(t, f.ledger)
+				if len(names) != 1 {
+					t.Fatalf("fixture temp count %d", len(names))
+				}
+				return os.Rename(foreign, filepath.Join(filepath.Dir(f.ledger), names[0]))
+			})
+			got := f.signRun(context.Background(), b)
+			ledgerHook = nil
+			if !fired {
+				t.Fatal("control did not reach rename hook")
+			}
+			if swap {
+				if !refusedWith(got, "LEDGER_FILE") {
+					t.Errorf("substitution must refuse before releasing grant: %+v", got)
+				}
+				if !bytes.Equal(readLedger(t, f.ledger), before) {
+					t.Error("refused temporary substitution replaced prior committed ledger")
+				}
+			} else {
+				grantIDOf(t, got)
+				if !bytes.Contains(readLedger(t, f.ledger), []byte(idA)) {
+					t.Error("valid neighbour lost prior seal")
+				}
+			}
+			reused := f.signRun(context.Background(), c)
+			if !refusedWith(reused, "SEAL_REUSED") {
+				t.Errorf("prior seal reusable after temporary substitution: exit%d error=%v", reused.code, reused.envelope.Error)
+			}
+		})
+	}
 }

@@ -44,13 +44,13 @@ type sealLedgerFile struct {
 // inode and no pathname change can move it. The lock is taken with
 // non-blocking attempts that stop when the caller's context is done, so a
 // wait for a held lock never outlasts the caller's deadline. A writer commits
-// an update by writing its own uniquely named temporary file, syncing it,
-// renaming it over the
-// ledger, checking that the ledger name now denotes that file, syncing the
-// directory and checking that the path still names the locked directory. A
-// failed or interrupted update therefore leaves the last committed ledger in
-// place. A missing ledger is a new, empty ledger; an existing ledger must be
-// a complete ledger document, so an empty or truncated file is refused, and
+// an update by writing its own uniquely named temporary file, syncing it and
+// atomically exchanging it with the ledger it read (see record), so a refused
+// commit can put that ledger back; it then syncs the directory and checks
+// that the path still names the locked directory. A failed, interrupted or
+// refused update therefore leaves the last committed ledger in place. A
+// missing ledger is a new, empty ledger; an existing ledger must be a
+// complete ledger document, so an empty or truncated file is refused, and
 // every entry must be one this CLI writes: a lower-case hex txid and grant id
 // and no seal or grant id recorded twice.
 type sealLedger struct {
@@ -58,6 +58,7 @@ type sealLedger struct {
 	locked  bool // this writer holds the exclusive flock on dir
 	path    string
 	name    string
+	held    *unix.Stat_t // device and inode of the ledger file read, nil when there was none
 	entries []SealEntry
 }
 
@@ -220,7 +221,11 @@ func (l *sealLedger) load() *Failure {
 	if err != nil || int64(len(raw)) != st.Size() || DecodeStrict(raw, &doc) != nil || doc.Schema != SealLedgerSchema || !validEntries(doc.Seals) {
 		return refuse("LEDGER_FILE")
 	}
-	l.entries = doc.Seals
+	var held unix.Stat_t
+	if unix.Fstat(fd, &held) != nil {
+		return refuse("LEDGER_FILE")
+	}
+	l.entries, l.held = doc.Seals, &held
 	return nil
 }
 
@@ -290,11 +295,21 @@ func (l *sealLedger) removeStaleTemps() {
 
 // record commits one more entry under the held lock. The new ledger is
 // written and synced to this writer's own temporary file, created exclusively
-// in the verified directory, and renamed over the ledger. After the rename
-// the ledger name must denote that same file and, after the directory sync,
-// the path must still name the locked directory; otherwise the record is
-// refused. Until the rename the committed ledger is untouched; a failure
-// before it removes the writer's temporary file and refuses.
+// in the verified directory. It is committed by one atomic exchange of the
+// temporary name and the ledger name, so the ledger it displaces stays whole
+// under the temporary name until the commit is accepted; the first record,
+// with no ledger to displace, is renamed onto the ledger name only while that
+// name is free. The commit stands only when the ledger name then denotes this
+// writer's file and the displaced file is the ledger this writer read.
+// Otherwise the record is refused and the change is undone: the exchange is
+// made again, which puts the displaced ledger back, and the ledger name must
+// then denote that displaced file again; a first record is renamed back off
+// the ledger name, which must then be free. A platform or file system without
+// the atomic exchange or the no-replace rename refuses the record; there is no
+// plain-rename fallback. After a commit that stands the directory is synced
+// and the path must still name the locked directory. Until the exchange the
+// committed ledger is untouched; a failure before it removes the writer's
+// temporary file and refuses.
 func (l *sealLedger) record(e SealEntry) *Failure {
 	if !l.locked || l.dir < 0 {
 		return refuse("LEDGER_FILE")
@@ -314,26 +329,28 @@ func (l *sealLedger) record(e SealEntry) *Failure {
 		return refuse("LEDGER_FILE")
 	}
 	f := os.NewFile(uintptr(fd), tmp)
-	renamed := false
+	keepTemp := false
 	defer func() {
 		f.Close()
-		if !renamed {
+		if !keepTemp {
 			unix.Unlinkat(l.dir, tmp, 0)
 		}
 	}()
 	if ledgerStep("write") != nil {
 		return refuse("LEDGER_FILE")
 	}
-	var mine, committed unix.Stat_t
+	var mine unix.Stat_t
 	if n, err := f.WriteAt(raw, 0); err != nil || n != len(raw) || f.Sync() != nil || unix.Fstat(fd, &mine) != nil || ledgerStep("rename") != nil {
 		return refuse("LEDGER_FILE")
 	}
-	if unix.Renameat(l.dir, tmp, l.dir, l.name) != nil {
-		return refuse("LEDGER_FILE")
+	var stands bool
+	if l.held == nil {
+		stands, keepTemp = l.commitFirst(tmp, &mine)
+	} else {
+		stands, keepTemp = l.commitExchange(tmp, &mine)
 	}
-	renamed = true
-	if unix.Fstatat(l.dir, l.name, &committed, unix.AT_SYMLINK_NOFOLLOW) != nil || !sameFile(&mine, &committed) {
-		return refuse("LEDGER_FILE") // the committed ledger is not this writer's file
+	if !stands {
+		return refuse("LEDGER_FILE") // the ledger is not this writer's file, or nothing was committed
 	}
 	if _, err := retryEINTR(func() (int, error) { return 0, unix.Fsync(l.dir) }); err != nil {
 		return refuse("LEDGER_FILE")
@@ -342,5 +359,64 @@ func (l *sealLedger) record(e SealEntry) *Failure {
 		return refuse("LEDGER_FILE") // the path no longer names the locked directory
 	}
 	l.entries = append(l.entries, e)
+	l.held = &mine
 	return nil
+}
+
+// statName stats a name in the verified directory without following a
+// symlink.
+func (l *sealLedger) statName(name string, st *unix.Stat_t) error {
+	return unix.Fstatat(l.dir, name, st, unix.AT_SYMLINK_NOFOLLOW)
+}
+
+// syncDir makes an undo durable where it can; the record is refused either way.
+func (l *sealLedger) syncDir() {
+	retryEINTR(func() (int, error) { return 0, unix.Fsync(l.dir) })
+}
+
+// commitExchange commits the synced temporary file over the ledger this writer
+// read by one atomic exchange. It reports whether the commit stands and
+// whether the temporary name must be kept because an undo was not verified
+// and that name may hold the displaced ledger.
+func (l *sealLedger) commitExchange(tmp string, mine *unix.Stat_t) (stands, keep bool) {
+	var now, displaced unix.Stat_t
+	if l.statName(l.name, &now) != nil || !sameFile(&now, l.held) {
+		return false, false // the ledger read under the lock is no longer in place; nothing moved
+	}
+	if exchangeAt(l.dir, tmp, l.name) != nil {
+		return false, false // no exchange, so nothing moved and nothing is committed
+	}
+	nameErr, tmpErr := l.statName(l.name, &now), l.statName(tmp, &displaced)
+	if nameErr == nil && tmpErr == nil && sameFile(&now, mine) && sameFile(&displaced, l.held) {
+		return true, false // the temporary name now holds the previous ledger, which is removed
+	}
+	// The ledger name denotes a file that is not this writer's, or the file
+	// displaced is not the ledger it read: exchange again to put back exactly
+	// what the first exchange displaced, and check that it is back.
+	if tmpErr != nil || exchangeAt(l.dir, tmp, l.name) != nil || l.statName(l.name, &now) != nil || !sameFile(&now, &displaced) {
+		return false, true
+	}
+	l.syncDir()
+	return false, false
+}
+
+// commitFirst commits the first record, when no ledger existed at load: the
+// temporary file is renamed onto the ledger name only while that name is free.
+// It reports whether the commit stands and whether the temporary name must be
+// kept because the undo was not verified.
+func (l *sealLedger) commitFirst(tmp string, mine *unix.Stat_t) (stands, keep bool) {
+	if renameNewAt(l.dir, tmp, l.name) != nil {
+		return false, false // a ledger appeared, or no no-replace rename: nothing moved
+	}
+	var now unix.Stat_t
+	if l.statName(l.name, &now) == nil && sameFile(&now, mine) {
+		return true, false
+	}
+	// Not this writer's file: rename it back off the ledger name, which must
+	// then be free again, as it was before this record.
+	if renameNewAt(l.dir, l.name, tmp) != nil || l.statName(l.name, &now) != unix.ENOENT {
+		return false, true
+	}
+	l.syncDir()
+	return false, false
 }

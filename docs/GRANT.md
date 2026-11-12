@@ -162,14 +162,32 @@ an owner-only regular file with one link.
 - A new seal is committed by writing the whole ledger to the writer's own
   temporary file `.<ledger name>.tmp-<16 random lower-case hex digits>`,
   created exclusively and without following symlinks in the same directory,
-  syncing it, renaming it over the ledger, checking that the ledger name now
-  denotes that same file (device and inode), syncing the directory and
-  checking that the path still names the locked directory. If a check fails
-  the sign refuses as `LEDGER_FILE` and releases no grant. Until the rename
-  the committed ledger is untouched, so a failed write (for example `ENOSPC`)
-  or an interrupted update leaves the previous ledger in force. A failed
-  update removes its temporary file. Under the lock, a file left by a crash
-  whose name matches that exact pattern is removed; no other name is touched.
+  syncing it, and then swapping it with the ledger in one atomic exchange
+  (`renameat2` with `RENAME_EXCHANGE` on Linux, `renameatx_np` with
+  `RENAME_SWAP` on macOS), relative to the locked directory handle. The
+  ledger that the exchange displaces stays whole under the temporary name.
+  The commit stands only if the ledger name then denotes this writer's file
+  (device and inode) and the displaced file is the ledger it read under the
+  lock. Otherwise the sign exchanges the two names again, which puts the
+  displaced ledger back, checks that the ledger name denotes it again, and
+  refuses as `LEDGER_FILE` with no grant released; the committed history and
+  every `SEAL_REUSED` refusal stay as they were. The first record, with no
+  ledger yet, is renamed onto the ledger name only while that name is free
+  (`RENAME_NOREPLACE`, `RENAME_EXCL`), and a file that is not the writer's
+  own is renamed back off it, so no ledger is left. After a commit that
+  stands, the displaced ledger is removed, the directory is synced and the
+  path must still name the locked directory. Until the exchange the committed
+  ledger is untouched, so a failed write (for example `ENOSPC`) or an
+  interrupted update leaves the previous ledger in force. A failed update
+  removes its temporary file. Under the lock, a file left by a crash whose
+  name matches that exact pattern is removed; no other name is touched.
+- A kernel, platform or file system without the atomic exchange or the
+  no-replace rename refuses every final sign as `LEDGER_FILE` (fail closed);
+  there is no plain-rename fallback. Linux needs `renameat2` with exchange
+  support in the file system (ext4, xfs, btrfs and tmpfs have it; some
+  network and FUSE file systems do not). macOS needs a volume with
+  `RENAME_SWAP` (APFS and HFS+ have it). Platforms other than Linux and
+  macOS have no exchange implementation and refuse.
 - The ledger file is created by the first recorded seal. A missing ledger is
   a new ledger. An existing ledger must be a complete ledger document whose
   entries this CLI writes: at least one entry, a lower-case hex `txid` and
@@ -180,8 +198,10 @@ an owner-only regular file with one link.
 - Durability. The temporary file is synced with Go's `File.Sync`, which on
   macOS uses `F_FULLFSYNC`. The directory is synced with plain `fsync`, which
   on macOS does not flush the drive's write cache. A killed process leaves the
-  previous or the new ledger; after a power loss on macOS the rename may be
-  lost and the previous ledger come back, forgetting the newest seal. Process
+  previous or the new ledger, under the ledger name or, killed between the
+  exchange and its undo, the previous ledger under the temporary name; after a
+  power loss on macOS the exchange may be lost and the previous ledger come
+  back, forgetting the newest seal. Process
   kills on Linux and passing macOS CI do not establish power-loss durability.
 
 The content is `{"schema":"swarma-identity/seal-ledger/1","seals":[{"txid","vout","grant_id"}]}`.
@@ -195,7 +215,21 @@ guarantee. Anyone who can write to the ledger's directory, or rename a
 directory above it, can delete or replace the ledger between runs; keep it in
 a directory only the issuer can modify. While a sign runs, such a change can
 make that sign refuse, but it cannot give the lock to a second writer of the
-same directory or make the sign commit a file other than its own.
+same directory or make the sign commit a file other than its own. A file
+substituted under the writer's temporary name before the exchange is
+refused and the displaced ledger is put back, so the refusal leaves the
+committed history in place. Remaining boundary: between the exchange and its
+undo the substituted file is briefly under the ledger name, where a
+concurrent `grant draft` or a `grant sign` without `grant_sig`, which read
+without the lock, can see it; neither releases a grant, and a final sign
+waits for the lock and reads the restored ledger. An actor that changes the
+ledger or temporary name again inside that window, or a kill or power loss
+in it, can defeat the undo: the sign still refuses with no grant released,
+keeps the temporary name (which may hold the previous ledger) instead of
+removing it, and the owner must check the ledger before the next sign, whose
+stale-file cleanup removes that name. Such an actor can replace the ledger
+directly anyway. The substitution cases are exercised by an in-process step
+hook, not by a racing process at a native syscall boundary.
 
 ## Refusals
 
