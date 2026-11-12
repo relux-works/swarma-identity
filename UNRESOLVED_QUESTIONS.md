@@ -9,3 +9,9 @@
 - `grant draft` cannot output the grant signing hash, as the design table suggests: the canonical v3 grant contains the consent signature and `landlord_sig`, so the hash exists only after both. `grant sign` therefore runs twice (stage `grant_hash`, then `signed`), and the landlord signs twice. Whether the leads want one landlord review covering both digests (for example a single keyvault prompt) is a signer-UX question outside this CLI.
 - `grant sign` does not read the seal on chain (existence, confirmation, unspent, P2PKH to the grant key); the read fence has no `gettxout`. The design puts this pre-check in `grant sign`; These commands check only the local seal ledger. Whether to add `gettxout` here or leave it to the planned `grant seal` and `grant anchor` commands is open.
 - Grant refusals use this CLI's exit codes (3 refusal, 2 bad input, 4 retry), not the design's (1 refusal, 2 retry), as `identity show` does.
+- G1-K Keychain grant key: the release store uses the data protection keychain, the only one macOS gives `SecAccessControl` biometry to. macOS admits code there only when it is signed with a keychain-access-group entitlement, which needs a provisioning profile. An ad-hoc `go build` binary is expected to get `KEYCHAIN_ENTITLEMENT` (`errSecMissingEntitlement`) at keygen. Hosted CI cannot settle this, because it has no Touch ID and writes nothing there. If Ivan's dry run shows it, the options are:
+  1. Sign `swarma-keychain` in an app-like bundle with Ivan's Apple developer team and a `keychain-access-groups` entitlement.
+  2. Fall back to the login file keychain with a default ACL and an in-process Touch ID gate. This is weaker, because macOS would not enforce the gate.
+
+  Choosing one is a decision for Ivan and the leads.
+- G1-K `keychain sign` takes a digest only together with the draft it binds to, so the landlord signs twice per grant (`contract_sha256`, then `grant_signing_hash`). Each signature asks for Touch ID separately.

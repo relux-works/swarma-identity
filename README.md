@@ -32,6 +32,15 @@ GOTOOLCHAIN=local GOMAXPROCS=2 go build -p 1 -o .temp/bin/swarma-identity ./cmd/
 .temp/bin/swarma-identity grant draft --config .temp/node.json --request .temp/draft.json --seal-ledger "$PWD/.temp/seal-ledger.json" --json
 .temp/bin/swarma-identity grant consent --request .temp/consent.json --json
 .temp/bin/swarma-identity grant sign --config .temp/node.json --request .temp/sign.json --seal-ledger "$PWD/.temp/seal-ledger.json" --json
+.temp/bin/swarma-identity value build --grant-xonly <x-only> --social-descriptor .temp/social.json --json
+```
+
+The Mac-only Keychain grant key (G1-K) is a separate binary, because `swarma-identity` itself never links a signer. See [docs/KEYCHAIN.md](docs/KEYCHAIN.md):
+
+```sh
+GOTOOLCHAIN=local go build -o .temp/bin/swarma-keychain ./cmd/swarma-keychain
+.temp/bin/swarma-keychain keychain keygen --label NAME --json
+.temp/bin/swarma-keychain keychain sign --label NAME --request .temp/keychain-sign.json --json
 ```
 
 The node custodian must authorize online use and select the credential file. A scan occupies the node's shared scan resource. The matched UTXO total covers only the explicit range; it is not an entire-account or spendable balance. Coinbase outputs can be included. Mempool, history and name-encumbered outputs are excluded.
@@ -47,8 +56,10 @@ Scratch output goes to `.temp/`, which Git ignores.
 | Tool | Purpose and exact entry point | Output |
 | --- | --- | --- |
 | Go 1.26.8 | Build: command above. Test: `GOTOOLCHAIN=local GOMAXPROCS=2 go test -p 1 -parallel 1 ./...`. Static checks: `GOTOOLCHAIN=local GOMAXPROCS=2 go vet -p 1 ./...`. | Binary under `.temp/bin/`; redirect logs to `.temp/`. |
-| gofmt | Format: `gofmt -w cmd/swarma-identity internal/facade`. | Updates those source files. |
-| swarma-identity | Seven commands above; every invocation requires `--json`. | One JSON envelope on stdout; fixed bounded diagnostics on stderr. |
+| gofmt | Format: `gofmt -w cmd internal`. | Updates those source files. |
+| swarma-identity | The commands above; every invocation requires `--json`. | One JSON envelope on stdout; fixed bounded diagnostics on stderr. |
+| swarma-keychain | darwin/cgo only: `keychain keygen`, `keychain sign`, `value build` ([docs/KEYCHAIN.md](docs/KEYCHAIN.md)). | One JSON envelope on stdout. The signing display and the confirmation use `/dev/tty`. |
+| Keychain tests (macOS) | `security create-keychain -p PW "$RUNNER_TEMP/swarma-test-X.keychain-db"`, unlock it, then `SWARMA_KEYCHAIN_TEST_PATH=<that path> go test -tags keychaintest -run 'TestTestKeychain\|TestKeychainDarwin' ./internal/keychain/ ./internal/facade/`. The `keychaintest` tag is for tests only and never goes into release builds. | Throwaway test keychain only; never the login keychain. |
 
 Tests use published public BIP84 vectors and fake loopback RPC fixtures with disposable credentials. They never discover or contact a live node. A pruned-node fixture establishes that the adapter makes no historical-block calls; it does not establish live-node qualification. CI runs serial tests and static checks on macOS.
 
