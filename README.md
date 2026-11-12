@@ -73,6 +73,8 @@ Use a standalone Go distribution for the full suite. The Nostr observer uses sta
 
 The offline Go planner in `internal/registration` constructs PSBTv0 reservation and reveal phases from a fixed public funding transaction, an independently selected account pin and immutable policy. It preserves exact approved value bytes and extracts the social and grant keys through the reveal-building path. Its public Core 28.0 fixtures cover both release modes. Plan construction establishes no chain state, signing, protected receipt provenance or broadcast permission. See [fixture details](internal/registration/testdata/core28/README.md).
 
+The same internal library prepares immutable signing requests and review frames, checks preserved PSBT maps and every public BIP143 signature, and assembles final witnesses. Result checks bind receipts to the request and require a zero exit plus the exact acknowledgement hashing the complete original result file. Reported journal fields remain unauthenticated public metadata; these checks grant no custody, owner-presence or release authority. Namecoin transaction commands and protected signer integration are not yet exposed by the CLI.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

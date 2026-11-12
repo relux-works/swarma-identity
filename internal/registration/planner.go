@@ -308,7 +308,11 @@ func mul(a, b uint64) (uint64, bool) {
 // object accepts unique, exact decoded member names and one bounded document.
 // Struct decoding alone would accept duplicate or case-aliased members.
 func object(b []byte, allowed ...string) (map[string]json.RawMessage, error) {
-	if len(b) == 0 || len(b) > 1<<20 || !utf8.Valid(b) {
+	return closedObject(b, 1<<20, allowed...)
+}
+
+func closedObject(b []byte, limit int, allowed ...string) (map[string]json.RawMessage, error) {
+	if len(b) == 0 || len(b) > limit || !utf8.Valid(b) {
 		return nil, ErrInput
 	}
 	keys := map[string]bool{}
