@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -39,6 +41,26 @@ func nostrResult(t *testing.T, e Envelope) map[string]json.RawMessage {
 	return result
 }
 
+func assertNostrKeys[V any](t *testing.T, object map[string]V, want ...string) {
+	t.Helper()
+	keys := make([]string, 0, len(object))
+	for key := range object {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	slices.Sort(want)
+	if !slices.Equal(keys, want) {
+		t.Fatalf("Nostr key set = %v, want %v", keys, want)
+	}
+}
+
+func assertNostrFields(t *testing.T, object, want map[string]any) {
+	t.Helper()
+	if !reflect.DeepEqual(object, want) {
+		t.Fatal("Nostr returned fields differ from independent expected values")
+	}
+}
+
 // Frozen NIP-01 bytes and independent hashes cover encoder defaults, Unicode,
 // lexical metadata preservation, exact integers and ordered duplicate tags.
 // All preparation is public and deterministic; no signature is manufactured.
@@ -64,6 +86,7 @@ func TestNostrProfileGolden(t *testing.T) {
 				t.Fatalf("offline prepare refused: code%d %#v", code, e.Error)
 			}
 			r := nostrResult(t, e)
+			assertNostrKeys(t, r, "schema", "canonical_utf8", "event")
 			var canonical, schema string
 			var event map[string]any
 			if len(r) != 3 || json.Unmarshal(r["canonical_utf8"], &canonical) != nil || json.Unmarshal(r["schema"], &schema) != nil || schema != "swarma-identity/nostr-profile-prepared/1" || json.Unmarshal(r["event"], &event) != nil || len(event) != 6 {
@@ -72,6 +95,8 @@ func TestNostrProfileGolden(t *testing.T) {
 			if hex.EncodeToString([]byte(canonical)) != row.CanonicalHex || event["id"] != row.ID || event["content"] != row.Fields["content"] {
 				t.Fatal("canonical bytes/id/content differ from independent golden")
 			}
+			assertNostrKeys(t, event, "id", "pubkey", "created_at", "kind", "tags", "content")
+			assertNostrFields(t, event, map[string]any{"id": row.ID, "pubkey": row.Fields["pubkey"], "created_at": row.Fields["created_at"], "kind": row.Fields["kind"], "tags": row.Fields["tags"], "content": row.Fields["content"]})
 			if _, exists := event["sig"]; exists {
 				t.Fatal("unsigned preparation invented a signature")
 			}
@@ -97,17 +122,30 @@ func TestNostrProfileSignedPublicFixture(t *testing.T) {
 	if json.Unmarshal(nostrResult(t, e)["event"], &prepared) != nil || prepared["id"] != event["id"] {
 		t.Fatal("public fixture id mismatch")
 	}
+	assertNostrKeys(t, prepared, "id", "pubkey", "created_at", "kind", "tags", "content")
+	wantPrepared := map[string]any{}
+	for _, key := range []string{"id", "pubkey", "created_at", "kind", "tags", "content"} {
+		wantPrepared[key] = event[key]
+	}
+	assertNostrFields(t, prepared, wantPrepared)
 	request := map[string]any{"schema": "swarma-identity/nostr-profile-verify/1", "event": event}
 	e, code, _ = runCLI(t, "nostr", "profile-verify", "--request", writeInput(t, request), "--json")
 	if code != 0 || !e.OK || e.Error != nil || e.Network != "" || e.Command != "nostr profile-verify" {
 		t.Fatalf("public verify control refused: %d %#v", code, e.Error)
 	}
 	r := nostrResult(t, e)
+	assertNostrKeys(t, r, "schema", "valid", "id", "pubkey", "created_at", "kind")
 	var valid bool
 	var id, schema string
 	if len(r) != 6 || json.Unmarshal(r["valid"], &valid) != nil || !valid || json.Unmarshal(r["id"], &id) != nil || id != event["id"] || json.Unmarshal(r["schema"], &schema) != nil || schema != "swarma-identity/nostr-profile-verified/1" {
 		t.Fatal("wrong verified result")
 	}
+	var summary map[string]any
+	b, _ := json.Marshal(e.Result)
+	if json.Unmarshal(b, &summary) != nil {
+		t.Fatal("verified summary")
+	}
+	assertNostrFields(t, summary, map[string]any{"schema": "swarma-identity/nostr-profile-verified/1", "valid": true, "id": event["id"], "pubkey": event["pubkey"], "created_at": event["created_at"], "kind": event["kind"]})
 }
 
 // Transport field order/whitespace/escaped aliases do not change the decoded

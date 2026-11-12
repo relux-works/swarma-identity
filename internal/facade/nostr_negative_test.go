@@ -1,6 +1,7 @@
 package facade
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -27,21 +28,33 @@ func assertNostrRefusal(t *testing.T, e Envelope, code int, want string, exit in
 	if strings.Contains(string(raw), "nostr-input-marker") {
 		t.Fatal("refusal echoed input")
 	}
-	wantMessage := fail(want).Message
-	if want == "EVENT_ID_MISMATCH" {
-		wantMessage = "The supplied event id does not match its canonical fields."
-	} else if want == "INVALID_SIGNATURE" {
-		wantMessage = "The supplied event signature is not valid for its public key and event id."
+	// Test-owned literals keep diagnostic drift visible even when production's
+	// failure helper changes along with the emitted message.
+	wantMessage, known := map[string]string{
+		"BAD_INPUT":              "The input does not satisfy the selected contract.",
+		"UNSUPPORTED_CAPABILITY": "The selected operation is refused by the read-only contract.",
+		"EVENT_ID_MISMATCH":      "The supplied event id does not match its canonical fields.",
+		"INVALID_SIGNATURE":      "The supplied event signature is not valid for its public key and event id.",
+	}[want]
+	if !known {
+		t.Fatal("missing independent Nostr diagnostic oracle")
 	}
 	if e.Error.Message != wantMessage {
 		t.Fatal("refusal did not use the fixed diagnostic")
 	}
+	var envelope map[string]json.RawMessage
+	var failure map[string]any
+	if json.Unmarshal(raw, &envelope) != nil || json.Unmarshal(envelope["error"], &failure) != nil {
+		t.Fatal("failure object")
+	}
+	assertNostrKeys(t, failure, "code", "message", "retryable")
+	assertNostrFields(t, failure, map[string]any{"code": want, "message": wantMessage, "retryable": false})
 }
 
-// This independent reference uses the standard JSON encoder only for ASCII
-// tamper fixtures without HTML/separator characters. Unicode/escaping expected
+// This independent reference uses the standard JSON encoder only for fixtures
+// without HTML/separator characters; ordinary Unicode stays literal. Escaping expected
 // bytes come separately from the frozen external golden corpus.
-func asciiNostrReference(t *testing.T, e map[string]any) string {
+func simpleNostrReference(t *testing.T, e map[string]any) string {
 	t.Helper()
 	b, err := json.Marshal([]any{0, e["pubkey"], e["created_at"], e["kind"], e["tags"], e["content"]})
 	if err != nil {
@@ -76,7 +89,7 @@ func TestNostrProfileTampering(t *testing.T) {
 				}
 				want := "EVENT_ID_MISMATCH"
 				if recompute {
-					event["id"] = asciiNostrReference(t, event)
+					event["id"] = simpleNostrReference(t, event)
 					want = "INVALID_SIGNATURE"
 				}
 				r := map[string]any{"schema": NostrVerifySchema, "event": event}
@@ -102,6 +115,61 @@ func TestNostrProfileTampering(t *testing.T) {
 			e, code, raw := runCLI(t, "nostr", "profile-verify", "--request", writeInput(t, map[string]any{"schema": NostrVerifySchema, "event": event}), "--json")
 			assertNostrRefusal(t, e, code, tc.code, 3, raw)
 		})
+	}
+	TestNostrProfileSignedPublicFixture(t)
+}
+
+// The permissive standard syntax checker accepts these byte-in-string inputs;
+// only the facade's UTF-8/Unicode contract must reject them. Valid literal UTF-8
+// and equivalent escaped surrogate pairs are nearby controls in both commands.
+func TestNostrStringEncoding(t *testing.T) {
+	for _, field := range []string{"tags", "content"} {
+		for _, command := range []string{"profile-prepare", "profile-verify"} {
+			t.Run(field+"/"+command, func(t *testing.T) {
+				event := publicNostrFixture(t)
+				if field == "tags" {
+					event["tags"] = [][]string{{"x", "😀"}}
+				} else {
+					event["content"] = `{"name":"😀"}`
+				}
+				event["id"] = simpleNostrReference(t, event)
+				var request any = nostrPrepareInput(event)
+				if command == "profile-verify" {
+					request = map[string]any{"schema": NostrVerifySchema, "event": event}
+				}
+				literal, err := json.Marshal(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if bytes.Count(literal, []byte("😀")) != 1 {
+					t.Fatal("encoding witness must isolate one string value")
+				}
+				for name, replacement := range map[string][]byte{"literal": []byte("😀"), "surrogate-pair": []byte(`\ud83d\ude00`), "invalid-utf8": {0xff}, "lone-surrogate": []byte(`\ud800`)} {
+					t.Run(name, func(t *testing.T) {
+						raw := bytes.Replace(literal, []byte("😀"), replacement, 1)
+						if !json.Valid(raw) {
+							t.Fatal("encoding witness accidentally broke JSON syntax")
+						}
+						e, code, output := runCLI(t, "nostr", command, "--request", writeNostrRaw(t, raw), "--json")
+						if name == "invalid-utf8" || name == "lone-surrogate" {
+							assertNostrRefusal(t, e, code, "BAD_INPUT", 2, output)
+						} else if command == "profile-verify" {
+							assertNostrRefusal(t, e, code, "INVALID_SIGNATURE", 3, output)
+						} else if code != 0 || !e.OK {
+							t.Fatal("valid string encoding control refused")
+						} else {
+							ref, _ := json.Marshal([]any{0, event["pubkey"], event["created_at"], event["kind"], event["tags"], event["content"]})
+							var canonical string
+							var prepared map[string]any
+							result := nostrResult(t, e)
+							if json.Unmarshal(result["canonical_utf8"], &canonical) != nil || canonical != string(ref) || json.Unmarshal(result["event"], &prepared) != nil || prepared["id"] != event["id"] {
+								t.Fatal("valid string encoding did not preserve canonical bytes/id")
+							}
+						}
+					})
+				}
+			})
+		}
 	}
 	TestNostrProfileSignedPublicFixture(t)
 }
