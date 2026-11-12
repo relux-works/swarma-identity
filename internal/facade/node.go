@@ -169,7 +169,7 @@ func (c *Client) Name(ctx context.Context, name string) (*NameResult, *Failure) 
 	}
 	m, ok := object(raw)
 	n := &NameResult{}
-	if !ok || !member(m, "name", &n.Name) || !member(m, "value", &n.ValueHex) || !member(m, "expires_in", &n.ExpiresIn) || !member(m, "expired", &n.Expired) || !member(m, "txid", &n.TxID) || !member(m, "vout", &n.Vout) || !member(m, "height", &n.Height) || n.Name != name || !hashValid(n.TxID) || n.Height < 0 || n.Height > h.Blocks || len(n.ValueHex) > 1040 {
+	if !ok || !member(m, "name", &n.Name) || !member(m, "value", &n.ValueHex) || !member(m, "expires_in", &n.ExpiresIn) || !member(m, "expired", &n.Expired) || !member(m, "txid", &n.TxID) || !member(m, "vout", &n.Vout) || !member(m, "height", &n.Height) || n.Name != name || !hashValid(n.TxID) || n.Height < 0 || len(n.ValueHex) > 1040 {
 		return nil, fail("PROVIDER_PROTOCOL")
 	}
 	value, err := hex.DecodeString(n.ValueHex)
@@ -185,6 +185,9 @@ func (c *Client) Name(ctx context.Context, name string) (*NameResult, *Failure) 
 	}
 	if f := c.sameTip(ctx, h.BlockHash); f != nil {
 		return nil, f
+	}
+	if n.Height > h.Blocks {
+		return nil, fail("PROVIDER_PROTOCOL")
 	}
 	n.ObservedTip = Tip{Hash: h.BlockHash, Height: h.Blocks}
 	return n, nil

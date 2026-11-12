@@ -23,9 +23,12 @@ type Failure struct {
 func fail(code string) *Failure {
 	f := &Failure{Code: code, Message: "The input does not satisfy the selected contract.", Exit: 2}
 	switch code {
-	case "UNSUPPORTED_CAPABILITY", "WRONG_NETWORK", "NODE_UNSYNCED", "NAME_NOT_FOUND", "NAME_EXPIRED", "WATCH_WALLET_REQUIRED", "ADDRESS_NOT_WATCHED", "BALANCE_COVERAGE_UNSUPPORTED":
+	case "UNSUPPORTED_CAPABILITY", "WRONG_NETWORK", "NODE_UNSYNCED", "NAME_EXPIRED", "WATCH_WALLET_REQUIRED", "ADDRESS_NOT_WATCHED", "BALANCE_COVERAGE_UNSUPPORTED":
 		f.Exit = 3
 		f.Message = "The selected operation is refused by the read-only contract."
+	case "NAME_NOT_FOUND":
+		f.Exit = 3
+		f.Message = "The requested name was not found."
 	case "SCAN_BUSY", "SNAPSHOT_CHANGED":
 		f.Exit = 4
 		f.Retryable = true

@@ -122,6 +122,32 @@ func TestCLIOnlineDocking(t *testing.T) {
 	}
 }
 
+// Missing names keep their resource code/exit and a fixed clear diagnostic,
+// without echoing the requested name or backend text. An active name still
+// succeeds through the same complete CLI/config path.
+func TestCLINameNotFoundMessage(t *testing.T) {
+	for _, mode := range []string{"", "absent"} {
+		t.Run(mode, func(t *testing.T) {
+			c, _, done := nodeFixture(t, mode, func() {})
+			defer done()
+			config := writeInput(t, c.config)
+			request := writeInput(t, struct {
+				Name string `json:"name"`
+			}{"d/example"})
+			e, code, raw := runCLI(t, "name", "show", "--config", config, "--request", request, "--json")
+			if mode == "" {
+				if code != 0 || e.Error != nil || e.Result == nil {
+					t.Fatal("active name control refused")
+				}
+				return
+			}
+			if code != 3 || e.Error == nil || e.Error.Code != "NAME_NOT_FOUND" || e.Error.Retryable || e.Error.Message != "The requested name was not found." || e.Result != nil || bytes.Contains(raw, []byte("d/example")) || bytes.Contains(raw, []byte("name never existed")) {
+				t.Fatalf("wrong missing-name diagnostic: %#v", e.Error)
+			}
+		})
+	}
+}
+
 // Complete public requests preserve every explicit path length and index. A null
 // in any supported position must fail at input decoding (empty network), before
 // selected configuration/credentials are prepared or any fixture RPC is sent.

@@ -56,7 +56,7 @@ func nodeFixture(t *testing.T, mode string, cancel context.CancelFunc) (*Client,
 			}
 		case "getbestblockhash":
 			value = fixtureTip
-			if mode == "tip" {
+			if mode == "tip" || mode == "name-tip-advanced" {
 				value = strings.Repeat("2", 64)
 			}
 		case "name_show":
@@ -70,6 +70,19 @@ func nodeFixture(t *testing.T, mode string, cancel context.CancelFunc) (*Client,
 				t.Error("implicit name options")
 			}
 			value = map[string]any{"name": "d/example", "value": "ff007b7d", "expired": mode == "expired", "expires_in": 100, "txid": strings.Repeat("3", 64), "vout": 0, "height": 99}
+			if mode == "expired" {
+				value.(map[string]any)["expires_in"] = -1
+			}
+			if mode == "name-tip-advanced" || mode == "name-height-future" {
+				value.(map[string]any)["height"] = 101
+			}
+			if mode == "expired-zero" {
+				value.(map[string]any)["expired"] = true
+				value.(map[string]any)["expires_in"] = 0
+			}
+			if mode == "inconsistent-expiry" {
+				value.(map[string]any)["expires_in"] = 0
+			}
 			if mode == "large-name" {
 				value.(map[string]any)["value"] = strings.Repeat("ff", 521)
 			}
@@ -191,6 +204,87 @@ func TestHealthAndName(t *testing.T) {
 			}
 			if f != nil || n.ValueHex != "ff007b7d" || n.ObservedTip.Hash != fixtureTip {
 				t.Fatal("wrong name positive")
+			}
+		})
+	}
+}
+
+// A new name update mined after preflight is a retryable snapshot change. A
+// stable valid name succeeds, while a future height under a stable tip remains
+// a provider failure. Neither failure returns a name or replays name_show.
+func TestNameSnapshotClassification(t *testing.T) {
+	for _, tc := range []struct {
+		mode, code string
+		exit       int
+		retryable  bool
+	}{
+		{"", "", 0, false},
+		{"tip", "SNAPSHOT_CHANGED", 4, true},
+		{"name-tip-advanced", "SNAPSHOT_CHANGED", 4, true},
+		{"name-height-future", "PROVIDER_PROTOCOL", 5, false},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			c, methods, done := nodeFixture(t, tc.mode, func() {})
+			defer done()
+			n, f := c.Name(context.Background(), "d/example")
+			if tc.code == "" {
+				if f != nil || n == nil || n.ObservedTip.Hash != fixtureTip || n.ObservedTip.Height != 100 || n.Height != 99 {
+					t.Fatal("stable name control failed")
+				}
+			} else if f == nil || f.Code != tc.code || f.Exit != tc.exit || f.Retryable != tc.retryable || n != nil {
+				t.Fatalf("wrong snapshot refusal: %#v", f)
+			}
+			nameReads := 0
+			for _, method := range *methods {
+				switch method {
+				case "getnetworkinfo", "getblockchaininfo", "getblockhash", "getbestblockhash":
+				case "name_show":
+					nameReads++
+				default:
+					t.Fatalf("unexpected name-read method %s", method)
+				}
+			}
+			if nameReads != 1 {
+				t.Fatal("name read was replayed")
+			}
+		})
+	}
+}
+
+// Faithful active/expired fixtures agree with the backend expiry predicate at
+// positive, zero and negative boundaries. An explicitly inconsistent response
+// remains a provider refusal; these are fake-node checks, not captured evidence.
+func TestNameExpiryFixtures(t *testing.T) {
+	for _, tc := range []struct {
+		mode       string
+		expiresIn  int64
+		expired    bool
+		code       string
+		consistent bool
+	}{
+		{"", 100, false, "", true},
+		{"expired-zero", 0, true, "NAME_EXPIRED", true},
+		{"expired", -1, true, "NAME_EXPIRED", true},
+		{"inconsistent-expiry", 0, false, "PROVIDER_PROTOCOL", false},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			c, _, done := nodeFixture(t, tc.mode, func() {})
+			defer done()
+			raw, f := c.call(context.Background(), "name_show", []any{"d/example", map[string]any{"nameEncoding": "utf8", "valueEncoding": "hex", "allowExpired": true}})
+			var provider struct {
+				Expired   bool  `json:"expired"`
+				ExpiresIn int64 `json:"expires_in"`
+			}
+			if f != nil || json.Unmarshal(raw, &provider) != nil || provider.Expired != tc.expired || provider.ExpiresIn != tc.expiresIn || (provider.Expired == (provider.ExpiresIn <= 0)) != tc.consistent {
+				t.Fatal("expiry fixture does not model its stated boundary")
+			}
+			n, f := c.Name(context.Background(), "d/example")
+			if tc.code == "" {
+				if f != nil || n == nil || n.Expired || n.ExpiresIn <= 0 {
+					t.Fatal("active expiry control refused")
+				}
+			} else if f == nil || f.Code != tc.code || n != nil {
+				t.Fatalf("wrong expiry refusal: %#v", f)
 			}
 		})
 	}
