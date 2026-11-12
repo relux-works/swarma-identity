@@ -17,6 +17,20 @@ var bip340 = []struct{ secret, public, aux, msg, sig string }{
 	{"0b432b2677937381aef05bb02a66ecd012773062cf3fa2549e44f58ed2401710", "25d1dff95105f5253c4022f628a996ad3a0d95fbf21d468a1b33f8c160d8f517", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "7eb0509757e246f19449885651611cb965ecc1a187dd51b64fda1edc9637d5ec97582b9cb13db3933705b32ba982af5af25fd78881ebb32771fc5922efc66ea3"},
 }
 
+// canonicalTemp returns a fresh test directory with every symlink resolved.
+// The key-file and ledger rules refuse any symlink path component, and on
+// macOS the default temporary directory is under /var, a symlink to
+// /private/var. Without this, every custody negative there would refuse for
+// the wrong reason and every positive control would fail.
+func canonicalTemp(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func keyFile(t *testing.T, dir, secret string, mode os.FileMode) string {
 	t.Helper()
 	raw, _ := hex.DecodeString(secret)
@@ -35,7 +49,7 @@ func keyFile(t *testing.T, dir, secret string, mode os.FileMode) string {
 // bytes, which reproduces vector 0 and the LIP-0013 E-V1 envelope signature.
 func TestSignerReproducesBIP340Vectors(t *testing.T) {
 	for i, v := range bip340 {
-		s, err := Open(keyFile(t, t.TempDir(), v.secret, 0600))
+		s, err := Open(keyFile(t, canonicalTemp(t), v.secret, 0600))
 		if err != nil {
 			t.Fatalf("vector %d: %v", i, err)
 		}
@@ -48,7 +62,7 @@ func TestSignerReproducesBIP340Vectors(t *testing.T) {
 		}
 		s.Close()
 	}
-	s, _ := Open(keyFile(t, t.TempDir(), bip340[0].secret, 0600))
+	s, _ := Open(keyFile(t, canonicalTemp(t), bip340[0].secret, 0600))
 	defer s.Close()
 	if sig, _ := s.Sign(bip340[0].msg); sig != bip340[0].sig {
 		t.Fatal("Sign does not use zero aux_rand")
@@ -69,17 +83,17 @@ func TestSignerReproducesBIP340Vectors(t *testing.T) {
 // (the secret 1, whose public key is the generator) are refused.
 func TestSignerKeyFileCustody(t *testing.T) {
 	good := bip340[1].secret
-	if s, err := Open(keyFile(t, t.TempDir(), good, 0600)); err != nil {
+	if s, err := Open(keyFile(t, canonicalTemp(t), good, 0600)); err != nil {
 		t.Fatalf("neighbour 0600 key refused: %v", err)
 	} else {
 		s.Close()
 	}
 	for _, mode := range []os.FileMode{0644, 0640, 0400} {
-		if _, err := Open(keyFile(t, t.TempDir(), good, mode)); !errors.Is(err, ErrKeyFile) {
+		if _, err := Open(keyFile(t, canonicalTemp(t), good, mode)); !errors.Is(err, ErrKeyFile) {
 			t.Fatalf("mode %o: %v", mode, err)
 		}
 	}
-	dir := t.TempDir()
+	dir := canonicalTemp(t)
 	real := filepath.Join(dir, "real")
 	os.Mkdir(real, 0700)
 	keyFile(t, real, good, 0600)
@@ -99,16 +113,16 @@ func TestSignerKeyFileCustody(t *testing.T) {
 	if _, err := Open(dir + "/./real/key"); !errors.Is(err, ErrKeyPath) {
 		t.Fatal("unclean path accepted")
 	}
-	short := filepath.Join(t.TempDir(), "short")
+	short := filepath.Join(canonicalTemp(t), "short")
 	os.WriteFile(short, make([]byte, 31), 0600)
 	if _, err := Open(short); !errors.Is(err, ErrKeyFile) {
 		t.Fatal("31-byte key accepted")
 	}
-	if _, err := Open(t.TempDir()); !errors.Is(err, ErrKeyFile) {
+	if _, err := Open(canonicalTemp(t)); !errors.Is(err, ErrKeyFile) {
 		t.Fatal("directory accepted")
 	}
 	one := "0000000000000000000000000000000000000000000000000000000000000001"
-	if _, err := Open(keyFile(t, t.TempDir(), one, 0600)); !errors.Is(err, ErrNotTestKey) {
+	if _, err := Open(keyFile(t, canonicalTemp(t), one, 0600)); !errors.Is(err, ErrNotTestKey) {
 		t.Fatalf("non-vector key: %v", err)
 	}
 }

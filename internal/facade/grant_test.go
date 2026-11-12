@@ -38,10 +38,24 @@ const (
 	sealB = "6666666666666666666666666666666666666666666666666666666666666666"
 )
 
+// canonicalTemp returns a fresh test directory with every symlink resolved.
+// The key-file and ledger rules refuse any symlink path component, and on
+// macOS the default temporary directory is under /var, a symlink to
+// /private/var. Without this, every custody negative there would refuse for
+// the wrong reason and every positive control would fail.
+func canonicalTemp(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func testSigner(t *testing.T, index int) *testsigner.Signer {
 	t.Helper()
 	raw, _ := hex.DecodeString(bip340Secrets[index])
-	p := filepath.Join(t.TempDir(), "test-key")
+	p := filepath.Join(canonicalTemp(t), "test-key")
 	if err := os.WriteFile(p, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +256,7 @@ func newFlow(t *testing.T, network, landlord, agent string) *flow {
 		landlord: activeRecord(landlordValue(testsigner_public(t, keyLandlord))),
 		agent:    activeRecord(agentValue(landlord)),
 	})
-	return &flow{t: t, node: node, ledger: filepath.Join(t.TempDir(), "seal-ledger.json"), grantee: testSigner(t, keyGrantee), landlord: testSigner(t, keyLandlord)}
+	return &flow{t: t, node: node, ledger: filepath.Join(canonicalTemp(t), "seal-ledger.json"), grantee: testSigner(t, keyGrantee), landlord: testSigner(t, keyLandlord)}
 }
 
 func testsigner_public(t *testing.T, index int) string { return testSigner(t, index).PublicKey() }
@@ -634,7 +648,7 @@ func TestGrantSealLedgerCustody(t *testing.T) {
 	f.stage1 = resultAs[GrantSignResult](t, e)
 	final := f.finalRequest()
 
-	dir := t.TempDir()
+	dir := canonicalTemp(t)
 	loose := filepath.Join(dir, "loose.json")
 	os.WriteFile(loose, nil, 0644)
 	os.Chmod(loose, 0644)

@@ -135,7 +135,10 @@ The seal is recorded in the ledger before the result is written.
 
 `--seal-ledger` names the issuer's local ledger. It must be an absolute, clean
 path with no symlink in any component, and an owner-only regular file with one
-link (`LEDGER_FILE` otherwise). A missing ledger reads as empty. `grant draft`
+link (`LEDGER_FILE` otherwise). On macOS, `/tmp` and `/var` are symlinks to
+`/private/tmp` and `/private/var`, so a ledger there must be named by its
+resolved `/private/...` path; paths under a home directory are normally
+already resolved. A missing ledger reads as empty. `grant draft`
 never creates it. `grant sign` with `grant_sig` creates it at 0600 and holds an
 exclusive `flock` from the lookup to the write.
 
@@ -177,7 +180,8 @@ refusals keep the codes of `identity show` (`NAME_NOT_FOUND`, `NAME_EXPIRED`,
 
 `internal/testsigner` exists for tests only. It loads a 32-byte key file that
 is 0600, owner-only, single-link, at a clean absolute path with no symlink
-component. It loads only the published secret keys of BIP-340 test vectors 0
+component (the macOS `/private/...` rule above applies). The tests resolve
+their temporary directories for this reason. It loads only the published secret keys of BIP-340 test vectors 0
 to 3 and refuses every other key, so it cannot be used with a real key. It
 signs with `aux_rand` of 32 zero bytes, as the LIP-0013 vectors do, and it
 reproduces the BIP-340 vectors. It is never the default, and the binary does
