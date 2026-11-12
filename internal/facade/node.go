@@ -177,10 +177,7 @@ func (c *Client) Name(ctx context.Context, name string) (*NameResult, *Failure) 
 		return nil, fail("PROVIDER_PROTOCOL")
 	}
 	n.ValueHex = hex.EncodeToString(value)
-	if n.Expired {
-		return nil, fail("NAME_EXPIRED")
-	}
-	if n.ExpiresIn <= 0 {
+	if !n.Expired && n.ExpiresIn <= 0 {
 		return nil, fail("PROVIDER_PROTOCOL")
 	}
 	if f := c.sameTip(ctx, h.BlockHash); f != nil {
@@ -188,6 +185,9 @@ func (c *Client) Name(ctx context.Context, name string) (*NameResult, *Failure) 
 	}
 	if n.Height > h.Blocks {
 		return nil, fail("PROVIDER_PROTOCOL")
+	}
+	if n.Expired {
+		return nil, fail("NAME_EXPIRED")
 	}
 	n.ObservedTip = Tip{Hash: h.BlockHash, Height: h.Blocks}
 	return n, nil

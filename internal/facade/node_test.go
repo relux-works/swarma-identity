@@ -56,7 +56,7 @@ func nodeFixture(t *testing.T, mode string, cancel context.CancelFunc) (*Client,
 			}
 		case "getbestblockhash":
 			value = fixtureTip
-			if mode == "tip" || mode == "name-tip-advanced" {
+			if mode == "tip" || mode == "name-tip-advanced" || mode == "expired-moving" {
 				value = strings.Repeat("2", 64)
 			}
 		case "name_show":
@@ -70,10 +70,11 @@ func nodeFixture(t *testing.T, mode string, cancel context.CancelFunc) (*Client,
 				t.Error("implicit name options")
 			}
 			value = map[string]any{"name": "d/example", "value": "ff007b7d", "expired": mode == "expired", "expires_in": 100, "txid": strings.Repeat("3", 64), "vout": 0, "height": 99}
-			if mode == "expired" {
+			if mode == "expired" || mode == "expired-future" || mode == "expired-moving" {
+				value.(map[string]any)["expired"] = true
 				value.(map[string]any)["expires_in"] = -1
 			}
-			if mode == "name-tip-advanced" || mode == "name-height-future" {
+			if mode == "name-tip-advanced" || mode == "name-height-future" || mode == "expired-future" || mode == "expired-moving" {
 				value.(map[string]any)["height"] = 101
 			}
 			if mode == "expired-zero" {
@@ -211,7 +212,9 @@ func TestHealthAndName(t *testing.T) {
 
 // A new name update mined after preflight is a retryable snapshot change. A
 // stable valid name succeeds, while a future height under a stable tip remains
-// a provider failure. Neither failure returns a name or replays name_show.
+// a provider failure, including expired names. A consistent expired name keeps
+// its refusal; a moving snapshot takes precedence. No refusal returns a name or
+// replays name_show.
 func TestNameSnapshotClassification(t *testing.T) {
 	for _, tc := range []struct {
 		mode, code string
@@ -222,6 +225,9 @@ func TestNameSnapshotClassification(t *testing.T) {
 		{"tip", "SNAPSHOT_CHANGED", 4, true},
 		{"name-tip-advanced", "SNAPSHOT_CHANGED", 4, true},
 		{"name-height-future", "PROVIDER_PROTOCOL", 5, false},
+		{"expired", "NAME_EXPIRED", 3, false},
+		{"expired-future", "PROVIDER_PROTOCOL", 5, false},
+		{"expired-moving", "SNAPSHOT_CHANGED", 4, true},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			c, methods, done := nodeFixture(t, tc.mode, func() {})
