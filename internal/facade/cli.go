@@ -45,7 +45,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	f := fail("BAD_INPUT")
 	if len(args) >= 2 {
 		switch args[0] + " " + args[1] {
-		case "node health", "name show", "address derive", "balance watch", "nostr profile-prepare", "nostr profile-verify":
+		case "node health", "name show", "identity show", "address derive", "balance watch", "nostr profile-prepare", "nostr profile-verify":
 			e.Command = args[0] + " " + args[1]
 			e.Network, e.Result, f = execute(ctx, e.Command, args[2:])
 		}
@@ -138,7 +138,7 @@ func execute(ctx context.Context, command string, args []string) (string, any, *
 		Name string `json:"name"`
 	}
 	var scanRequest ScanRequest
-	if command == "name show" {
+	if command == "name show" || command == "identity show" {
 		if f := inputFile(requestPath, &nameRequest); f != nil {
 			return "", nil, f
 		}
@@ -177,6 +177,9 @@ func execute(ctx context.Context, command string, args []string) (string, any, *
 		return network, result, f
 	case "name show":
 		result, f := c.Name(ctx, nameRequest.Name)
+		return network, result, f
+	case "identity show":
+		result, f := c.Identity(ctx, nameRequest.Name)
 		return network, result, f
 	case "balance watch":
 		result, f := c.Scan(ctx, scanRequest)

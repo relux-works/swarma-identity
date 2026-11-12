@@ -32,6 +32,16 @@ The auth file contains `username:password` (including the node's cookie format),
 
 Name reads compare the preflight tip hash with a hash sampled after `name_show`. A changed hash gives `SNAPSHOT_CHANGED`, including a reorganization at the same height. Equal endpoint hashes do not prove an atomic snapshot: the tip could move A → B → A between observations. This interface cannot detect every intermediate change and does not claim that it can. The provider's `expired` flag must equal `expires_in <= 0`; contradictory fields are `PROVIDER_PROTOCOL` before the final tip read.
 
+`identity show --config FILE --request FILE --json` accepts exactly `{"name":"id/example"}` with the `name show` input rules and projects the record through the v3 (LIP-0004) value parsers `ParseLandlordIdentity` and `ParseAgentIdentity` of `github.com/relux-works/swarma-chain-lab/experiments/rental` at pseudo-version `v0.5.1-0.20261112085009-7ea1800ed187` (chain-lab commit `7ea1800`). Those parsers admit only canonical compact JSON of at most 520 bytes with valid x-only keys. The result always contains `name,role,value_hex,txid,vout,height,expires_in,observed_tip`, where `value_hex` is the exact value bytes. `role` and its members:
+
+| `role` | Additional members |
+| --- | --- |
+| `landlord` | `grant_key`; `social:{key,relays}` when the value carries a `nostr` descriptor. |
+| `agent` | `nostr_key`, `landlord` (the pointer), optional `social`; `landlord_resolved:{name,grant_key,social?,value_hex,txid,vout,height,expires_in}` when the pointer names an active v3 landlord, otherwise `reason:"LANDLORD_NOT_V3"`. |
+| `none` | `reason:"VALUE_NOT_V3"`: the value is neither v3 shape, for example `{"nostr":{...}}` without a `swarma` member. |
+
+`relays` lists the descriptor's relays for its root key in value order, or `[]`. A present `reason` means the record is not a usable v3 identity, including for `role:"agent"`; it is an observation, not a refusal. For an agent, the landlord is read with a second `name_show` between the same preflight tip and closing tip comparison; a missing, expired or non-landlord pointer target (including another agent or the agent itself) gives `LANDLORD_NOT_V3`. Any other failure of that second read is returned as its own refusal. Only one hop is resolved. Refusals and snapshot semantics are those of `name show`: `NAME_NOT_FOUND`, `NAME_EXPIRED`, `SNAPSHOT_CHANGED` and `PROVIDER_PROTOCOL` (including value hex that is malformed or longer than 520 bytes, for the target or the landlord). The projection establishes no grant, seal, rotation history or pending-mempool state.
+
 `address derive --request FILE --json` works entirely offline:
 
 ```json

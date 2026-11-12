@@ -163,6 +163,26 @@ func (c *Client) Name(ctx context.Context, name string) (*NameResult, *Failure) 
 	if h.InitialBlockDownload {
 		return nil, fail("NODE_UNSYNCED")
 	}
+	n, f := c.readName(ctx, name)
+	if f != nil {
+		return nil, f
+	}
+	if f := c.sameTip(ctx, h.BlockHash); f != nil {
+		return nil, f
+	}
+	if n.Height > h.Blocks {
+		return nil, fail("PROVIDER_PROTOCOL")
+	}
+	if n.Expired {
+		return nil, fail("NAME_EXPIRED")
+	}
+	n.ObservedTip = Tip{Hash: h.BlockHash, Height: h.Blocks}
+	return n, nil
+}
+
+// readName sends one explicit name_show and validates the consumed record. It
+// takes no tip observation; callers bracket it with Health and sameTip.
+func (c *Client) readName(ctx context.Context, name string) (*NameResult, *Failure) {
 	raw, f := c.call(ctx, "name_show", []any{name, map[string]any{"nameEncoding": "utf8", "valueEncoding": "hex", "allowExpired": true}})
 	if f != nil {
 		return nil, f
@@ -180,16 +200,6 @@ func (c *Client) Name(ctx context.Context, name string) (*NameResult, *Failure) 
 	if n.Expired != (n.ExpiresIn <= 0) {
 		return nil, fail("PROVIDER_PROTOCOL")
 	}
-	if f := c.sameTip(ctx, h.BlockHash); f != nil {
-		return nil, f
-	}
-	if n.Height > h.Blocks {
-		return nil, fail("PROVIDER_PROTOCOL")
-	}
-	if n.Expired {
-		return nil, fail("NAME_EXPIRED")
-	}
-	n.ObservedTip = Tip{Hash: h.BlockHash, Height: h.Blocks}
 	return n, nil
 }
 
