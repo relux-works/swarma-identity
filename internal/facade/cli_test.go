@@ -47,6 +47,11 @@ func runCLI(t *testing.T, args ...string) (Envelope, int, []byte) {
 	t.Helper()
 	var out, diagnostics bytes.Buffer
 	code := Run(context.Background(), args, &out, &diagnostics)
+	if len(args) >= 2 && args[0] == "nostr" && (args[1] == "profile-prepare" || args[1] == "profile-verify") {
+		if problem := nostrWireProblem(out.Bytes(), "nostr "+args[1]); problem != "" {
+			t.Fatalf("invalid Nostr wire envelope: %s", problem)
+		}
+	}
 	if diagnostics.Len() != 0 || !outputSafe(out.Bytes()) {
 		t.Fatal("unsafe CLI output")
 	}

@@ -474,6 +474,9 @@ func (o *nostrObserver) run(t *testing.T, binary, command string, request any) (
 		code = exit.ExitCode()
 	}
 	var e Envelope
+	if problem := nostrWireProblem(out.Bytes(), "nostr "+command); problem != "" {
+		t.Fatalf("invalid Nostr wire envelope: %s", problem)
+	}
 	if !outputSafe(out.Bytes()) || json.Unmarshal(out.Bytes(), &e) != nil {
 		t.Fatal("observer command did not return a valid closed envelope")
 	}
