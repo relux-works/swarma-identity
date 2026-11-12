@@ -94,6 +94,10 @@ Coverage is always:
 
 This is the matched current UTXO total, including immature coinbase when present. It establishes neither spendability nor funds outside the requested range. Name-prefixed outputs do not match plain P2WPKH scripts; read name state separately.
 
+## Trust-grant issuance
+
+`grant draft`, `grant consent` and `grant sign` issue a Grant v3 with a LIP-0013 `swarma-trust-contract/1` contract in two phases without any private key in the process. Their schemas, the signing flow, the seal ledger and their refusals are in [GRANT.md](GRANT.md). Named grant refusals exit 3.
+
 ## Offline Nostr profiles
 
 These two commands accept `--request FILE --json` only, without `--config`, `--mode`, relay, signing or output-file options. They read no ambient configuration, key or timestamp and perform no network operations. Their envelope `network` is always `""`; `command` is `nostr profile-prepare` or `nostr profile-verify`.

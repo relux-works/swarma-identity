@@ -1,6 +1,6 @@
 ---
 name: swarma-identity
-description: Use the Swarma Identity CLI for Namecoin reads, public-account derivation, bounded UTXO scans and offline Nostr kind-0 preparation or public-signature verification. Signing and publication are separate capabilities.
+description: Use the Swarma Identity CLI for Namecoin reads, public-account derivation, bounded UTXO scans, offline Nostr kind-0 preparation or public-signature verification, and two-phase trust-grant issuance (draft, consent, sign) with external signers. Signing keys and publication are separate capabilities.
 ---
 
 # Swarma Identity
@@ -14,6 +14,8 @@ Use the repository-built `swarma-identity` CLI. Read [the CLI contract](../../..
 - Current UTXOs: `swarma-identity balance watch --mode utxo-scan --config FILE --request FILE --json`. Require the node custodian's authorization to occupy its shared scan resource. Supply exactly branches `[0,1]`, P2WPKH and an explicit range of at most 1000 indices per branch.
 - Unsigned profile: `swarma-identity nostr profile-prepare --request FILE --json`. Supply an explicit public x-only key, timestamp, kind0, ordered tags and JSON-object content text under the exact schema and limits in the CLI contract. The result includes canonical bytes as a UTF-8 string and an unsigned event, never a signature.
 - Public profile verification: `swarma-identity nostr profile-verify --request FILE --json`. Supply the complete already-signed public event under the verification schema. Success binds its canonical fields, id and BIP-340 signature only; it establishes no relay publication, ownership, freshness, domain or identity authority.
+
+- Trust grant, two-phase (see [the grant contract](../../../docs/GRANT.md)): `grant draft --config FILE --request FILE --seal-ledger ABS_FILE --json` builds the LIP-0013 contract and v3 fields and lists the digests to sign in `to_sign`; the grantee signs `consent_event_id` with its own signer; `grant consent --request FILE --json` verifies that consent; the landlord signs `contract_sha256`; `grant sign --config FILE --request FILE --seal-ledger ABS_FILE --json` without `grant_sig` returns `grant_signing_hash`; the landlord signs it; `grant sign` with `grant_sig` returns `signed_grant`, `grant_id` and `commitment`. Pass only digests to the signer and only public signatures back. Never give this CLI a private key, a key file or a Keychain item; it has no option for one. The grant is not live until it is anchored and verified by the planned anchor and verify commands.
 
 Both Nostr commands are offline, accept no config or signing flag and select no ambient key or timestamp. Content text and tag order are preserved. Check `EVENT_ID_MISMATCH` and `INVALID_SIGNATURE` as refusals with no partial result, never as `valid:false` successes. Keep public input files explicit; do not supply private keys or obtain a signature through this interface.
 

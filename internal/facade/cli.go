@@ -45,7 +45,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	f := fail("BAD_INPUT")
 	if len(args) >= 2 {
 		switch args[0] + " " + args[1] {
-		case "node health", "name show", "identity show", "address derive", "balance watch", "nostr profile-prepare", "nostr profile-verify":
+		case "node health", "name show", "identity show", "address derive", "balance watch", "nostr profile-prepare", "nostr profile-verify", "grant draft", "grant consent", "grant sign":
 			e.Command = args[0] + " " + args[1]
 			e.Network, e.Result, f = execute(ctx, e.Command, args[2:])
 		}
@@ -69,8 +69,8 @@ func execute(ctx context.Context, command string, args []string) (string, any, *
 	flags := flag.NewFlagSet("swarma-identity", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	jsonOutput := flags.Bool("json", false, "")
-	var configPath, requestPath, mode string
-	offline := command == "address derive" || command == "nostr profile-prepare" || command == "nostr profile-verify"
+	var configPath, requestPath, mode, ledgerPath string
+	offline := command == "address derive" || command == "nostr profile-prepare" || command == "nostr profile-verify" || command == "grant consent"
 	if !offline {
 		flags.StringVar(&configPath, "config", "", "")
 	}
@@ -79,6 +79,9 @@ func execute(ctx context.Context, command string, args []string) (string, any, *
 	}
 	if command == "balance watch" {
 		flags.StringVar(&mode, "mode", "utxo-scan", "")
+	}
+	if command == "grant draft" || command == "grant sign" {
+		flags.StringVar(&ledgerPath, "seal-ledger", "", "")
 	}
 	// The command interface accepts long options once, not positional arguments
 	// or last-value-wins ambiguity. Values themselves are not interpreted here.
@@ -119,6 +122,14 @@ func execute(ctx context.Context, command string, args []string) (string, any, *
 		result, f := VerifyNostrProfile(r)
 		return "", result, f
 	}
+	if command == "grant consent" {
+		var r GrantConsentRequest
+		if f := inputFile(requestPath, &r); f != nil {
+			return "", nil, f
+		}
+		result, f := ConsentGrant(r)
+		return selectedNetwork(pinnedNetwork(r.Draft.Network)), result, f
+	}
 	if command == "address derive" {
 		var r DeriveRequest
 		if f := inputFile(requestPath, &r); f != nil {
@@ -138,6 +149,18 @@ func execute(ctx context.Context, command string, args []string) (string, any, *
 		Name string `json:"name"`
 	}
 	var scanRequest ScanRequest
+	var draftRequest GrantDraftRequest
+	var signRequest GrantSignRequest
+	if command == "grant draft" {
+		if f := inputFile(requestPath, &draftRequest); f != nil {
+			return "", nil, f
+		}
+	}
+	if command == "grant sign" {
+		if f := inputFile(requestPath, &signRequest); f != nil {
+			return "", nil, f
+		}
+	}
 	if command == "name show" || command == "identity show" {
 		if f := inputFile(requestPath, &nameRequest); f != nil {
 			return "", nil, f
@@ -183,6 +206,12 @@ func execute(ctx context.Context, command string, args []string) (string, any, *
 		return network, result, f
 	case "balance watch":
 		result, f := c.Scan(ctx, scanRequest)
+		return network, result, f
+	case "grant draft":
+		result, f := c.DraftGrant(ctx, draftRequest, ledgerPath)
+		return network, result, f
+	case "grant sign":
+		result, f := c.SignGrant(ctx, signRequest, ledgerPath)
 		return network, result, f
 	}
 	return network, nil, fail("BAD_INPUT")

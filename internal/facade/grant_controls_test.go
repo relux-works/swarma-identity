@@ -1,0 +1,194 @@
+package facade
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+const testsignerPackage = "github.com/relux-works/swarma-identity/internal/testsigner"
+
+// Signing and private-key construction APIs that product code must not use.
+var forbiddenKeyAPIs = []string{"schnorr.Sign(", "ecdsa.Sign", "PrivKeyFromBytes", "NewPrivateKey", "PrivateKey", "IssueGrant", "testsigner"}
+
+// keyAPIUse returns the first forbidden key API that the source text uses.
+func keyAPIUse(source []byte) string {
+	for _, api := range forbiddenKeyAPIs {
+		if bytes.Contains(source, []byte(api)) {
+			return api
+		}
+	}
+	return ""
+}
+
+func controlScratch(t *testing.T, prefix string) (*nostrObserver, string) {
+	t.Helper()
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".temp"), 0700); err != nil {
+		t.Fatalf("control scratch root: %v", err)
+	}
+	scratch, err := os.MkdirTemp(filepath.Join(root, ".temp"), prefix)
+	if err != nil {
+		t.Fatalf("control scratch: %v", err)
+	}
+	return &nostrObserver{root: root, scratch: scratch}, root
+}
+
+// Claim: the shipped binary cannot hold a private key through this repository:
+// its dependency closure excludes the test signer, and no product source file
+// under cmd/ or internal/facade/ uses a signing or private-key API. The control
+// halves show that the dependency check sees the signer where it is imported
+// and that the source scan flags each forbidden API in a planted snippet.
+// Limit: the linked chain-lab rental module still contains its own regtest
+// issuer code; this proves only that no product path here calls it.
+func TestBinaryHoldsNoSigner(t *testing.T) {
+	o, root := controlScratch(t, "grant-custody-")
+	deps := string(o.goCommand(t, "deps-binary", "list", "-mod=readonly", "-deps", "./cmd/swarma-identity"))
+	if !strings.Contains(deps, "github.com/relux-works/swarma-identity/internal/facade\n") || strings.Contains(deps, testsignerPackage) {
+		t.Fatal("binary dependency closure includes the test signer or is unreadable")
+	}
+	control := string(o.goCommand(t, "deps-control", "list", "-mod=readonly", "-deps", "./internal/testsigner"))
+	if !strings.Contains(control, testsignerPackage+"\n") {
+		t.Fatal("dependency control does not see a direct listing of the signer")
+	}
+	var files []string
+	for _, dir := range []string{"cmd/swarma-identity", "internal/facade"} {
+		matches, _ := filepath.Glob(filepath.Join(root, dir, "*.go"))
+		for _, m := range matches {
+			if !strings.HasSuffix(m, "_test.go") {
+				files = append(files, m)
+			}
+		}
+	}
+	if len(files) < 10 {
+		t.Fatal("source scan found too few product files")
+	}
+	for _, path := range files {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if api := keyAPIUse(b); api != "" {
+			t.Fatalf("%s uses %s", filepath.Base(path), api)
+		}
+	}
+	for _, api := range forbiddenKeyAPIs {
+		if keyAPIUse([]byte("package facade\nfunc f() { _ = "+api+" }\n")) != api {
+			t.Fatalf("source scan misses planted %s", api)
+		}
+	}
+}
+
+// Claim: each key grant-issuance negative is detected by its named test. Removing one
+// product check in an isolated overlay copy makes that test fail at its own
+// assertion, while the unmodified build passes the same selection. One
+// planted removal is expected to survive, and its bound is stated below.
+// Limit: single-check removals, not exhaustive mutation testing. Files on
+// disk are never changed.
+func TestGrantPlantedControls(t *testing.T) {
+	o, root := controlScratch(t, "grant-controls-")
+	cases := []struct {
+		name, pkg, file, before, after, test, diagnostic string
+		survives                                         bool
+	}{
+		{"no-consent-signature", "facade", "grant.go",
+			"if !sigValid(d.GranteeKey, e.ID, e.Sig) {", "if false {",
+			"^TestGrantConsentSignerNegatives$", "want CONSENT_SIGNATURE", false},
+		{"no-consent-signer", "facade", "grant.go",
+			"if e.Pubkey != d.GranteeKey {", "if false {",
+			"^TestGrantConsentSignerNegatives$", "want CONSENT_SIGNER", false},
+		{"no-contract-hash", "facade", "trust_contract.go",
+			"if sha256Hex(raw) != g.ContractSHA256 {", "if false {",
+			"^TestGrantFieldsBindToContract$", "want CONTRACT_HASH", false},
+		{"no-agent-binding", "facade", "trust_contract.go",
+			"c.LandlordName != g.LandlordName || c.AgentName != g.AgentName ||", "c.LandlordName != g.LandlordName ||",
+			"^TestGrantFieldsBindToContract$", "want CONTRACT_MISMATCH", false},
+		{"no-scope-binding", "facade", "trust_contract.go",
+			"if g.Scope == nil || !slices.Equal(trustScope(c.Actions), g.Scope) {", "if g.Scope == nil {",
+			"^TestGrantFieldsBindToContract$", "want SCOPE_MISMATCH", false},
+		{"no-budget-binding", "facade", "trust_contract.go",
+			"if c.SpendBudget != g.Budget {", "if false {",
+			"^TestGrantFieldsBindToContract$", "want BUDGET_MISMATCH", false},
+		{"no-on-chain-key-pin", "facade", "grant.go",
+			"if onChain != d.IssuerKey {", "if false {",
+			"^TestGrantLandlordKeyNegatives$", "want LANDLORD_KEY_MISMATCH", false},
+		{"no-landlord-sig-check", "facade", "grant.go",
+			"if !sigValid(onChain, d.ContractSHA256, r.LandlordSig) {", "if false {",
+			"^TestGrantLandlordKeyNegatives$", "want LANDLORD_SIGNATURE", false},
+		// Bound: rental.ParseSignedGrant re-verifies the grant signature and
+		// refuses with the same code, so this removal is not observable.
+		{"no-grant-sig-check", "facade", "grant.go",
+			"if !sigValid(onChain, hash, r.GrantSig) {", "if false {",
+			"^TestGrantLandlordKeyNegatives$", "", true},
+		{"no-genesis-pin-at-sign", "facade", "grant.go",
+			"if d.Network != c.config.Network || c.config.Node.GenesisHash != pinnedGenesis(d.Network) {", "if d.Network != c.config.Network {",
+			"^TestGrantDraftPartyNegatives$", "want NETWORK_PIN", false},
+		{"no-seal-check-at-sign", "facade", "grant.go",
+			`if recorded != "" && recorded != id {`, "if false {",
+			"^TestGrantSealReuse$", "want SEAL_REUSED", false},
+		{"no-seal-check-at-draft", "facade", "grant.go",
+			`if ledger.lookup(r.Seal.TxID, r.Seal.Vout) != "" {`, "if false {",
+			"^TestGrantSealReuse$", "want SEAL_REUSED", false},
+		{"no-key-file-mode", "testsigner", "testsigner.go",
+			"st.Mode().Perm() == 0600", "true",
+			"^TestSignerKeyFileCustody$", "mode 644", false},
+		{"no-key-symlink-check", "testsigner", "testsigner.go",
+			"if real, err := filepath.EvalSymlinks(path); err != nil || real != path {", "if real, err := filepath.EvalSymlinks(path); (err != nil || real != path) && false {",
+			"^TestSignerKeyFileCustody$", "key behind a symlinked directory: <nil>", false},
+		{"no-test-vector-allowlist", "testsigner", "testsigner.go",
+			"if _, ok := PublishedKeys[public]; !ok {", "if _, ok := PublishedKeys[public]; !ok && false {",
+			"^TestSignerKeyFileCustody$", "non-vector key", false},
+	}
+	baselines := map[string]string{}
+	for _, pkg := range []string{"facade", "testsigner"} {
+		baselines[pkg] = filepath.Join(o.scratch, pkg+"-baseline.test")
+		o.goCommand(t, pkg+"-baseline-build", "test", "-mod=readonly", "-p", "1", "-c", "-o", baselines[pkg], "./internal/"+pkg)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if code, _ := o.testProcess(t, baselines[tc.pkg], tc.name+"-positive", tc.test); code != 0 {
+				t.Fatal("unmodified grant control failed")
+			}
+			path := filepath.Join(root, "internal", tc.pkg, tc.file)
+			source, err := os.ReadFile(path)
+			if err != nil || bytes.Count(source, []byte(tc.before)) != 1 {
+				t.Fatal("grant plant setup: expected exactly one source anchor")
+			}
+			copyPath := filepath.Join(o.scratch, tc.name+".go")
+			if err := os.WriteFile(copyPath, bytes.Replace(source, []byte(tc.before), []byte(tc.after), 1), 0600); err != nil {
+				t.Fatal(err)
+			}
+			overlay, _ := json.Marshal(map[string]any{"Replace": map[string]string{path: copyPath}})
+			overlayPath := filepath.Join(o.scratch, tc.name+".json")
+			if err := os.WriteFile(overlayPath, overlay, 0600); err != nil {
+				t.Fatal(err)
+			}
+			binary := filepath.Join(o.scratch, tc.name+".test")
+			o.goCommand(t, tc.name+"-build", "test", "-mod=readonly", "-p", "1", "-c", "-overlay", overlayPath, "-o", binary, "./internal/"+tc.pkg)
+			t.Cleanup(func() { os.Remove(binary) })
+			code, log := o.testProcess(t, binary, tc.name+"-negative", tc.test)
+			if tc.survives {
+				if code != 0 {
+					t.Fatalf("expected survivor was killed: exit%d; log under %s", code, o.scratch)
+				}
+				t.Logf("control %s: survives as stated (backstop refuses with the same code)", tc.name)
+				return
+			}
+			if code != 1 || !strings.Contains(log, tc.diagnostic) || !strings.Contains(log, "--- FAIL: Test") || strings.Contains(log, "panic:") {
+				t.Fatalf("grant plant missed its assertion: exit%d; log under %s", code, o.scratch)
+			}
+			t.Logf("control %s: unmodified exit0; plant exit1 at %q", tc.name, tc.diagnostic)
+		})
+	}
+	t.Cleanup(func() {
+		for _, b := range baselines {
+			os.Remove(b)
+		}
+	})
+}
