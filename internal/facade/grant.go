@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/relux-works/swarma-chain-lab/experiments/rental"
 )
@@ -22,6 +23,10 @@ const (
 
 	regtestGenesis = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
 	consentKind    = 8181
+
+	// grantSignBound is the total time grant sign may take, ledger lock wait
+	// included.
+	grantSignBound = 15 * time.Second
 )
 
 // Signing purposes. Each names one exact 32-byte BIP-340 message.
@@ -258,7 +263,7 @@ func (c *Client) DraftGrant(ctx context.Context, r GrantDraftRequest, ledgerPath
 	if r.ConsentCreatedAt < 1 || r.ConsentCreatedAt >= r.NotAfter {
 		return nil, refuse("CONSENT_TIME")
 	}
-	ledger, f := openSealLedger(ledgerPath, false)
+	ledger, f := openSealLedger(ctx, ledgerPath, false)
 	if f != nil {
 		return nil, f
 	}
@@ -313,6 +318,10 @@ func (c *Client) SignGrant(ctx context.Context, r GrantSignRequest, ledgerPath s
 	if r.Schema != GrantSignSchema {
 		return nil, fail("BAD_INPUT")
 	}
+	// One total bound covers the ledger lock wait and the node reads; an
+	// earlier caller deadline or cancellation ends both sooner.
+	ctx, cancel := context.WithTimeout(ctx, grantSignBound)
+	defer cancel()
 	d := r.Draft
 	if d.Network != c.config.Network || c.config.Node.GenesisHash != pinnedGenesis(d.Network) {
 		return nil, refuse("NETWORK_PIN")
@@ -325,7 +334,7 @@ func (c *Client) SignGrant(ctx context.Context, r GrantSignRequest, ledgerPath s
 		return nil, f
 	}
 	final := r.GrantSig != ""
-	ledger, f := openSealLedger(ledgerPath, final)
+	ledger, f := openSealLedger(ctx, ledgerPath, final)
 	if f != nil {
 		return nil, f
 	}

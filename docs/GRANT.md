@@ -147,21 +147,42 @@ an owner-only regular file with one link.
 
 - `grant draft`, and `grant sign` without `grant_sig`, only read the ledger
   and never create anything. A missing ledger reads as empty.
-- `grant sign` with `grant_sig` holds an exclusive `flock` on the sidecar
-  `<ledger>.lock` (owner-only, created at 0600, never replaced) from the
-  lookup to the commit. After taking the lock it checks that the path still
-  names the same directory and that lock file; otherwise it refuses as
-  `LEDGER_FILE`.
-- A new seal is committed by writing the whole ledger to `.<ledger name>.tmp`
-  in the same directory, syncing it, renaming it over the ledger and syncing
-  the directory. Until that rename the committed ledger is untouched, so a
-  failed write (for example `ENOSPC`) or an interrupted update leaves the
-  previous ledger in force. A failed update removes its temporary file; one
-  left by a crash is replaced by the next update.
+- `grant sign` with `grant_sig` holds an exclusive `flock` on the verified
+  directory handle itself, from before it reads the ledger until its result
+  is written. The lock belongs to the directory inode, so renaming or
+  replacing a name in or above the directory cannot move it to another
+  writer. No lock file is used; a `<ledger>.lock` left by an earlier version
+  is ignored. After taking the lock the command checks that the path still
+  names the same directory; otherwise it refuses as `LEDGER_FILE`.
+- The lock wait follows the caller. Attempts are non-blocking and repeat
+  every 10 ms until the lock is free, the caller's context is done, or the
+  15-second total bound of `grant sign` is reached; that bound also covers
+  the node reads. A sign that gives up refuses as `LEDGER_FILE` with no
+  result and writes nothing.
+- A new seal is committed by writing the whole ledger to the writer's own
+  temporary file `.<ledger name>.tmp-<16 random lower-case hex digits>`,
+  created exclusively and without following symlinks in the same directory,
+  syncing it, renaming it over the ledger, checking that the ledger name now
+  denotes that same file (device and inode), syncing the directory and
+  checking that the path still names the locked directory. If a check fails
+  the sign refuses as `LEDGER_FILE` and releases no grant. Until the rename
+  the committed ledger is untouched, so a failed write (for example `ENOSPC`)
+  or an interrupted update leaves the previous ledger in force. A failed
+  update removes its temporary file. Under the lock, a file left by a crash
+  whose name matches that exact pattern is removed; no other name is touched.
 - The ledger file is created by the first recorded seal. A missing ledger is
-  a new ledger. An existing ledger must be a complete ledger document: an
-  empty or truncated file refuses as `LEDGER_FILE` (fail closed), and nothing
-  is recorded until the owner repairs it.
+  a new ledger. An existing ledger must be a complete ledger document whose
+  entries this CLI writes: at least one entry, a lower-case hex `txid` and
+  `grant_id` in each, and no seal or `grant_id` recorded twice. An empty or
+  truncated file, an empty `grant_id` or any other entry outside that shape
+  refuses as `LEDGER_FILE` (fail closed) at every step, never reads as a free
+  seal, and nothing is recorded until the owner repairs the ledger.
+- Durability. The temporary file is synced with Go's `File.Sync`, which on
+  macOS uses `F_FULLFSYNC`. The directory is synced with plain `fsync`, which
+  on macOS does not flush the drive's write cache. A killed process leaves the
+  previous or the new ledger; after a power loss on macOS the rename may be
+  lost and the previous ledger come back, forgetting the newest seal. Process
+  kills on Linux and passing macOS CI do not establish power-loss durability.
 
 The content is `{"schema":"swarma-identity/seal-ledger/1","seals":[{"txid","vout","grant_id"}]}`.
 A seal backs at most one grant. Draft, and sign without `grant_sig`, refuse a
@@ -172,7 +193,9 @@ records a seal. The ledger holds public data only.
 The ledger is local single-use tracking for one issuer, not a chain-level
 guarantee. Anyone who can write to the ledger's directory, or rename a
 directory above it, can delete or replace the ledger between runs; keep it in
-a directory only the issuer can modify.
+a directory only the issuer can modify. While a sign runs, such a change can
+make that sign refuse, but it cannot give the lock to a second writer of the
+same directory or make the sign commit a file other than its own.
 
 ## Refusals
 
@@ -221,14 +244,19 @@ not import it.
 - **Fixture node.** "Regtest" in the tests means a regtest-pinned loopback
   fixture node, not a Namecoin Core regtest daemon.
 - **Signer adapters.** The keyvault, Keychain and NIP-07 adapters are external.
-  This CLI only exchanges digests and signatures with them.
+  This CLI hands them each digest together with the exact public bytes it
+  commits to (see Signer display) and takes back only public signatures. It
+  never takes a private key.
 - **Bare v3 parsing does not bind the contract.** `rental.ParseSignedGrant`
   treats `contract_sha256` as opaque: a re-signed grant whose agent, landlord,
   grantee, window, scope, budget or consent tags disagree with its contract
   still parses. Every step here applies the LIP-0013 section 2.5 binding; a
   verifier must also hash the exact contract bytes and apply that binding.
-- **Signer display.** The CLI supplies exact bytes (`contract_b64`,
-  `grant_b64`) beside each digest. A signer should render those bytes and
+- **Signer display.** The CLI supplies the exact public bytes beside each
+  digest: `consent_template`, whose NIP-01 serialization hashes to
+  `consent_event_id`; `contract_b64`, whose SHA-256 is `contract_sha256`; and
+  `grant_b64`, the canonical unsigned grant behind `grant_signing_hash`. Pass
+  those bytes to the signer with the digest. A signer should render them and
   recompute the digest from them; signing a digest supplied on its own does
   not show the signer what it approves.
 - **Wall-clock window.** The window and `created_at` are checked for shape and

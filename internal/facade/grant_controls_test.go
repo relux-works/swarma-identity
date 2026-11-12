@@ -85,10 +85,11 @@ func TestBinaryHoldsNoSigner(t *testing.T) {
 	}
 }
 
-// Claim: each key grant-issuance negative is detected by its named test. Removing one
-// product check in an isolated overlay copy makes that test fail at its own
-// assertion, while the unmodified build passes the same selection. One
-// planted removal is expected to survive, and its bound is stated below.
+// Claim: each key grant-issuance negative is detected by its named test. Removing or
+// narrowing one product check in an isolated overlay copy makes that test
+// fail at its own assertion, while the unmodified build passes the same
+// selection. One planted removal is expected to survive, and its bound is
+// stated beside it.
 // Limit: single-check removals, not exhaustive mutation testing. Files on
 // disk are never changed.
 func TestGrantPlantedControls(t *testing.T) {
@@ -139,7 +140,7 @@ func TestGrantPlantedControls(t *testing.T) {
 			"next, err := openAt(dir, c, unix.O_RDONLY|unix.O_DIRECTORY, 0)", "next, err := unix.Openat(dir, c, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)",
 			"^TestGrantSealLedgerCustody$", "want LEDGER_FILE", false},
 		{"no-ledger-rebind-check", "facade", "seal_ledger.go",
-			`err != nil || !l.bound() || ledgerStep("locked") != nil`, `err != nil || ledgerStep("locked") != nil`,
+			`lockDir(ctx, dir) != nil || !l.bound() || ledgerStep("locked") != nil`, `lockDir(ctx, dir) != nil || ledgerStep("locked") != nil`,
 			"^TestSealLedgerParentSubstitution$", "want LEDGER_FILE", false},
 		{"no-ledger-handle-binding", "facade", "seal_ledger.go",
 			"fd, err := openAt(l.dir, l.name, unix.O_RDONLY|unix.O_NONBLOCK, 0)", "fd, err := openAt(unix.AT_FDCWD, l.path, unix.O_RDONLY|unix.O_NONBLOCK, 0)",
@@ -151,8 +152,32 @@ func TestGrantPlantedControls(t *testing.T) {
 			"fd, err := openAt(l.dir, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL, 0600)", "tmp = l.name\n\tfd, err := openAt(l.dir, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC, 0600)",
 			"^TestSealLedgerWriteFailureKeepsHistory$", "failed write step changed the committed ledger", false},
 		{"ledger-stale-temp-kept", "facade", "seal_ledger.go",
-			"if err := unix.Unlinkat(l.dir, tmp, 0); err != nil && err != unix.ENOENT {", "if err := error(nil); err != nil {",
-			"^TestSealLedgerInterruptedUpdate$", "command refused: exit", false},
+			"l.removeStaleTemps()", "_ = l",
+			"^TestSealLedgerInterruptedUpdate$", "stale temporary file survived a committed update", false},
+		{"ledger-lock-on-pathname", "facade", "seal_ledger.go",
+			"if lockDir(ctx, dir) != nil", `if lockDir(ctx, func() int { fd, _ := openAt(dir, name+".lock", unix.O_RDWR|unix.O_CREAT, 0600); return fd }()) != nil`,
+			"^TestSealLedgerLockSubstitution$", "both writers ran", false},
+		{"ledger-no-post-rename-inode-check", "facade", "seal_ledger.go",
+			"|| !sameFile(&mine, &committed) {", "{",
+			"^TestSealLedgerForeignTempCommit$", "committed a temporary file that is not its own", false},
+		{"ledger-shared-temp-name", "facade", "seal_ledger.go",
+			"tmp := l.tempPrefix() + hex.EncodeToString(suffix[:])", "tmp := l.tempPrefix() + hex.EncodeToString(make([]byte, len(suffix)))",
+			"^TestSealLedgerTempOwnership$", "writers did not use their own temporary files", false},
+		{"ledger-entry-unchecked", "facade", "seal_ledger.go",
+			"|| !validEntries(doc.Seals) {", "{",
+			"^TestSealLedgerMalformedEntries$", "want LEDGER_FILE", false},
+		{"ledger-entry-unchecked-owner-witness", "facade", "seal_ledger.go",
+			"|| !validEntries(doc.Seals) {", "{",
+			"^TestReviewPR8EmptyGrantID$", "invalid ledger grant_id must refuse LEDGER_FILE", false},
+		{"ledger-lock-blocking-owner-witness", "facade", "seal_ledger.go",
+			"unix.LOCK_EX|unix.LOCK_NB", "unix.LOCK_EX",
+			"^TestReviewPR8LedgerLockDeadline$", "exceeded 15-second total bound", false},
+		{"ledger-lock-ignores-caller-deadline", "facade", "grant.go",
+			"ledger, f := openSealLedger(ctx, ledgerPath, final)", "lockCtx, lockCancel := context.WithTimeout(context.Background(), grantSignBound)\n\tdefer lockCancel()\n\tledger, f := openSealLedger(lockCtx, ledgerPath, final)",
+			"^TestSealLedgerLockCallerDeadline$", "still waiting on the ledger lock after 2 s", false},
+		{"ledger-lock-unbounded", "facade", "grant.go",
+			"ctx, cancel := context.WithTimeout(ctx, grantSignBound)", "cancel := context.CancelFunc(func() {})",
+			"^TestSealLedgerLockTotalBound$", "past the 15-second total bound", false},
 		{"no-key-file-mode", "testsigner", "testsigner.go",
 			"st.Mode().Perm() == 0600", "true",
 			"^TestSignerKeyFileCustody$", "mode 644", false},

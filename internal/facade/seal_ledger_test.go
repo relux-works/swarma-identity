@@ -2,11 +2,15 @@ package facade
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // setLedgerHook installs the ledger step hook for one test. No facade test
@@ -34,6 +38,23 @@ func sealFixture(t *testing.T, f *flow) (a, b, c GrantSignRequest) {
 	f.prepare(reqC)
 	c = f.finalRequest()
 	return a, b, c
+}
+
+// ledgerTemps lists the temporary-file names beside the ledger: every name
+// that starts with ".<ledger name>.tmp".
+func ledgerTemps(t *testing.T, ledger string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Dir(ledger))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "."+filepath.Base(ledger)+".tmp") {
+			names = append(names, e.Name())
+		}
+	}
+	return names
 }
 
 func readLedger(t *testing.T, path string) []byte {
@@ -76,8 +97,8 @@ func TestSealLedgerWriteFailureKeepsHistory(t *testing.T) {
 		if got, _ := os.ReadFile(f.ledger); !bytes.Equal(got, committed) {
 			t.Fatalf("a failed %s step changed the committed ledger", step)
 		}
-		if _, err := os.Lstat(filepath.Join(filepath.Dir(f.ledger), ".seal-ledger.json.tmp")); !os.IsNotExist(err) {
-			t.Fatalf("a failed %s step left its temporary file", step)
+		if left := ledgerTemps(t, f.ledger); len(left) != 0 {
+			t.Fatalf("a failed %s step left its temporary file %v", step, left)
 		}
 		e, code = f.signCmd(c)
 		mustRefuse(t, e, code, "SEAL_REUSED")
@@ -104,8 +125,8 @@ func TestSealLedgerWriteFailureKeepsHistory(t *testing.T) {
 // LEDGER_FILE by draft and by both sign stages, for the reused seal and for a
 // fresh one, and nothing is recorded; only a missing ledger reads as new. An
 // update interrupted after writing its temporary file leaves the committed
-// ledger in force: C still refuses SEAL_REUSED, and B issues and replaces
-// the stale temporary file.
+// ledger in force: C still refuses SEAL_REUSED, and B issues and removes the
+// stale temporary file.
 // Limit: the interrupted states are planted on disk, not produced by killing
 // a process mid-update.
 func TestSealLedgerInterruptedUpdate(t *testing.T) {
@@ -144,7 +165,7 @@ func TestSealLedgerInterruptedUpdate(t *testing.T) {
 	if err := os.WriteFile(f.ledger, committed, 0600); err != nil {
 		t.Fatal(err)
 	}
-	stale := filepath.Join(filepath.Dir(f.ledger), ".seal-ledger.json.tmp")
+	stale := filepath.Join(filepath.Dir(f.ledger), ".seal-ledger.json.tmp-00112233445566ff")
 	if err := os.WriteFile(stale, committed[:7], 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -252,5 +273,87 @@ func TestOpenLedgerDir(t *testing.T) {
 	syscall.Close(fd)
 	if _, _, err := openLedgerDir(root + "/link/b/ledger.json"); !errors.Is(err, syscall.ELOOP) && !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("symlinked component refused for another reason: %v", err)
+	}
+}
+
+// Review witness: an explicit empty grant_id in an existing entry is invalid
+// ledger state, not evidence that the referenced seal is unused. A valid
+// committed control refuses another grant; rejection must preserve disk bytes.
+func TestReviewPR8EmptyGrantID(t *testing.T) {
+	f := newFlow(t, "regtest", "id/landlord-a", "id/landlord-a-agent")
+	a, _, c := sealFixture(t, f)
+	e, code := f.signCmd(a)
+	mustOK(t, e, code)
+	id := resultAs[GrantSignResult](t, e).GrantID
+	e, code = f.signCmd(c)
+	mustRefuse(t, e, code, "SEAL_REUSED")
+	committed := readLedger(t, f.ledger)
+	if bytes.Count(committed, []byte(id)) != 1 {
+		t.Fatal("witness setup: grant id not unique")
+	}
+	bad := bytes.Replace(committed, []byte(id), nil, 1)
+	if err := os.WriteFile(f.ledger, bad, 0600); err != nil {
+		t.Fatal(err)
+	}
+	e, code = f.signCmd(c)
+	if code == 0 || e.OK || e.Error == nil || e.Error.Code != "LEDGER_FILE" || e.Result != nil {
+		t.Errorf("invalid ledger grant_id must refuse LEDGER_FILE without result: exit%d ok=%t error=%v", code, e.OK, e.Error)
+	}
+	if !bytes.Equal(readLedger(t, f.ledger), bad) {
+		t.Error("refused invalid ledger was modified: reused seal received another grant")
+	}
+}
+
+// Review witness: a caller with an expired deadline cannot wait indefinitely
+// on another writer's ledger flock. Hold only our fixture lock; after the
+// 16-second observation release it and join the call so no goroutine is left.
+func TestReviewPR8LedgerLockDeadline(t *testing.T) {
+	f := newFlow(t, "regtest", "id/landlord-a", "id/landlord-a-agent")
+	f.prepare(regtestRequest([]string{"instruct"}, []string{}, 0))
+	req := f.finalRequest()
+	e, code := f.signCmd(req)
+	mustOK(t, e, code)
+	before := readLedger(t, f.ledger)
+	held, failure := openSealLedger(context.Background(), f.ledger, true)
+	if failure != nil {
+		t.Fatalf("fixture lock: %v", failure)
+	}
+	defer held.close()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	args := []string{"grant", "sign", "--config", f.node.config, "--request", writeInput(t, req), "--seal-ledger", f.ledger, "--json"}
+	type outcome struct {
+		code     int
+		envelope Envelope
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		var out, errout bytes.Buffer
+		code := Run(ctx, args, &out, &errout)
+		var e Envelope
+		_ = json.Unmarshal(out.Bytes(), &e)
+		done <- outcome{code, e}
+	}()
+	var got outcome
+	finished := false
+	select {
+	case got = <-done:
+		finished = true
+	case <-time.After(16 * time.Second):
+		t.Error("grant sign exceeded 15-second total bound while waiting on ledger flock despite expired caller deadline")
+	}
+	held.close()
+	if !finished {
+		select {
+		case got = <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("call did not finish after releasing fixture lock")
+		}
+	}
+	if got.code == 0 || got.envelope.OK || got.envelope.Result != nil || got.envelope.Error == nil || (got.envelope.Error.Code != "LEDGER_FILE" && got.envelope.Error.Code != "RPC_UNAVAILABLE") {
+		t.Errorf("deadline outcome was not the intended closed refusal: exit%d error=%v", got.code, got.envelope.Error)
+	}
+	if !bytes.Equal(readLedger(t, f.ledger), before) {
+		t.Error("deadline call changed ledger")
 	}
 }
