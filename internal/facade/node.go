@@ -177,7 +177,7 @@ func (c *Client) Name(ctx context.Context, name string) (*NameResult, *Failure) 
 		return nil, fail("PROVIDER_PROTOCOL")
 	}
 	n.ValueHex = hex.EncodeToString(value)
-	if !n.Expired && n.ExpiresIn <= 0 {
+	if n.Expired != (n.ExpiresIn <= 0) {
 		return nil, fail("PROVIDER_PROTOCOL")
 	}
 	if f := c.sameTip(ctx, h.BlockHash); f != nil {
