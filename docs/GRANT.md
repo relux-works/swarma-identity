@@ -134,21 +134,45 @@ The seal is recorded in the ledger before the result is written.
 ## Seal ledger
 
 `--seal-ledger` names the issuer's local ledger. It must be an absolute, clean
-path with no symlink in any component, and an owner-only regular file with one
-link (`LEDGER_FILE` otherwise). On macOS, `/tmp` and `/var` are symlinks to
-`/private/tmp` and `/private/var`, so a ledger there must be named by its
-resolved `/private/...` path; paths under a home directory are normally
-already resolved. A missing ledger reads as empty. `grant draft`
-never creates it. `grant sign` with `grant_sig` creates it at 0600 and holds an
-exclusive `flock` from the lookup to the write.
+path with no symlink in any component (`LEDGER_FILE` otherwise). On macOS,
+`/tmp` and `/var` are symlinks to `/private/tmp` and `/private/var`, so a
+ledger there must be named by its resolved `/private/...` path; paths under a
+home directory are normally already resolved. Every directory on the path must
+be readable by the issuer.
+
+The CLI opens the ledger's directory from `/` one component at a time, each
+relative to the directory before it and without following symlinks, and does
+every later step relative to that directory handle. The ledger itself must be
+an owner-only regular file with one link.
+
+- `grant draft`, and `grant sign` without `grant_sig`, only read the ledger
+  and never create anything. A missing ledger reads as empty.
+- `grant sign` with `grant_sig` holds an exclusive `flock` on the sidecar
+  `<ledger>.lock` (owner-only, created at 0600, never replaced) from the
+  lookup to the commit. After taking the lock it checks that the path still
+  names the same directory and that lock file; otherwise it refuses as
+  `LEDGER_FILE`.
+- A new seal is committed by writing the whole ledger to `.<ledger name>.tmp`
+  in the same directory, syncing it, renaming it over the ledger and syncing
+  the directory. Until that rename the committed ledger is untouched, so a
+  failed write (for example `ENOSPC`) or an interrupted update leaves the
+  previous ledger in force. A failed update removes its temporary file; one
+  left by a crash is replaced by the next update.
+- The ledger file is created by the first recorded seal. A missing ledger is
+  a new ledger. An existing ledger must be a complete ledger document: an
+  empty or truncated file refuses as `LEDGER_FILE` (fail closed), and nothing
+  is recorded until the owner repairs it.
 
 The content is `{"schema":"swarma-identity/seal-ledger/1","seals":[{"txid","vout","grant_id"}]}`.
 A seal backs at most one grant. Draft, and sign without `grant_sig`, refuse a
 recorded seal. Sign with `grant_sig` refuses a seal recorded for another
-`grant_id`, and is idempotent for the same one. A refused final sign may leave
-an empty ledger file and never records a seal. A crash during the write can
-leave a ledger that no longer parses, and that ledger then refuses as
-`LEDGER_FILE` (fail closed). The ledger holds public data only.
+`grant_id`, and is idempotent for the same one. A refused final sign never
+records a seal. The ledger holds public data only.
+
+The ledger is local single-use tracking for one issuer, not a chain-level
+guarantee. Anyone who can write to the ledger's directory, or rename a
+directory above it, can delete or replace the ledger between runs; keep it in
+a directory only the issuer can modify.
 
 ## Refusals
 
@@ -198,6 +222,15 @@ not import it.
   fixture node, not a Namecoin Core regtest daemon.
 - **Signer adapters.** The keyvault, Keychain and NIP-07 adapters are external.
   This CLI only exchanges digests and signatures with them.
+- **Bare v3 parsing does not bind the contract.** `rental.ParseSignedGrant`
+  treats `contract_sha256` as opaque: a re-signed grant whose agent, landlord,
+  grantee, window, scope, budget or consent tags disagree with its contract
+  still parses. Every step here applies the LIP-0013 section 2.5 binding; a
+  verifier must also hash the exact contract bytes and apply that binding.
+- **Signer display.** The CLI supplies exact bytes (`contract_b64`,
+  `grant_b64`) beside each digest. A signer should render those bytes and
+  recompute the digest from them; signing a digest supplied on its own does
+  not show the signer what it approves.
 - **Wall-clock window.** The window and `created_at` are checked for shape and
   order only. Freshness against the wall clock is the verifier's decision
   (`rental.Check`).

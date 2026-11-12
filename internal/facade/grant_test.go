@@ -526,10 +526,10 @@ func TestGrantLandlordKeyNegatives(t *testing.T) {
 	e, code = f2.signCmd(GrantSignRequest{Schema: GrantSignSchema, Draft: d2, ConsentEvent: rental.Event{ID: d2.ConsentTemplate.ID, Pubkey: d2.GranteeKey, CreatedAt: d2.ConsentTemplate.CreatedAt, Kind: 8181, Tags: d2.ConsentTemplate.Tags, Content: "", Sig: sign(t, f2.grantee, d2.ConsentTemplate.ID)}, LandlordSig: sign(t, f2.landlord, d2.ContractSHA256)})
 	mustRefuse(t, e, code, "LANDLORD_KEY_MISMATCH")
 
-	// A refused final stage may leave the locked ledger created but empty;
-	// it never records a seal.
-	if st, err := os.Stat(f.ledger); err == nil && st.Size() != 0 {
-		t.Fatal("a refused sign recorded a seal")
+	// A refused final stage may leave the lock file; it never creates the
+	// ledger or records a seal.
+	if _, err := os.Lstat(f.ledger); !os.IsNotExist(err) {
+		t.Fatal("a refused sign created the seal ledger")
 	}
 	e, code = f.signCmd(f.finalRequest()) // neighbour: the on-chain key's signatures
 	mustOK(t, e, code)
