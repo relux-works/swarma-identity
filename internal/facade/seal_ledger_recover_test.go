@@ -452,3 +452,193 @@ func TestSealLedgerRecoverReadBack(t *testing.T) {
 		})
 	}
 }
+
+// Claim (rev179): a torn entry that stops at the end of a vout is a torn
+// write only when some vout the writer could still complete it to is free.
+// With the ledger holding A's txid at vout 0, 4294967295 or 429496730, a
+// leftover that stops right after that txid and those digits refuses
+// LEDGER_FILE (exit 3), keeps the leftover and the ledger byte for byte and
+// keeps fencing sign: the number ends there, which repeats the seal, or goes
+// on, which a leading zero or uint32 forbids. Neighbours, each removed with
+// nothing restored and the history kept: the same digits on a free txid, and
+// on A's txid digits that still have a free completion (an empty vout,
+// 429496729, 42949673).
+// Limit: on-disk fixtures under this CLI, not a native crash.
+func TestSealLedgerRecoverTerminalVout(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		held   uint32
+		txid   string
+		digits string
+		valid  bool
+	}{
+		{"terminal-zero", 0, sealA, "0", false},
+		{"terminal-max", 4294967295, sealA, "4294967295", false},
+		{"terminal-nine-digit", 429496730, sealA, "429496730", false},
+		{"free-seal-zero", 0, sealB, "0", true},
+		{"free-seal-max", 4294967295, sealB, "4294967295", true},
+		{"free-seal-nine-digit", 429496730, sealB, "429496730", true},
+		{"reused-txid-empty-vout", 0, sealA, "", true},
+		{"reused-txid-extendable-max", 4294967295, sealA, "429496729", true},
+		{"reused-txid-extendable-nine-digit", 429496730, sealA, "42949673", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFlow(t, "regtest", "id/landlord-a", "id/landlord-a-agent")
+			a, b, c := sealFixture(t, f)
+			idA := grantIDOf(t, f.signRun(context.Background(), a))
+			committed, _ := compactJSON(sealLedgerFile{SealLedgerSchema, []SealEntry{{sealA, 1, idA}, {sealA, tc.held, strings.Repeat("7", 64)}}})
+			if err := os.WriteFile(f.ledger, committed, 0600); err != nil {
+				t.Fatal(err)
+			}
+			raw := append(append([]byte{}, committed[:len(committed)-2]...), `,{"txid":"`+tc.txid+`","vout":`+tc.digits...)
+			left := filepath.Join(filepath.Dir(f.ledger), ".seal-ledger.json.tmp-2030405060708090")
+			if err := os.WriteFile(left, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			e, code := f.recoverRun()
+			if tc.valid {
+				mustOK(t, e, code)
+				if got := resultAs[LedgerRecoverResult](t, e); got != (LedgerRecoverResult{2, 0, 1}) {
+					t.Fatalf("valid recovery result: %+v", got)
+				}
+				if _, err := os.Lstat(left); !os.IsNotExist(err) || !bytes.Equal(readLedger(t, f.ledger), committed) {
+					t.Fatal("valid prefix was kept or changed committed history")
+				}
+				if got := f.signRun(context.Background(), c); !refusedWith(got, "SEAL_REUSED") {
+					t.Fatal("valid recovery lost A")
+				}
+				grantIDOf(t, f.signRun(context.Background(), b))
+				return
+			}
+			if code != 3 || e.OK || e.Error == nil || e.Error.Code != "LEDGER_FILE" {
+				t.Errorf("impossible terminal vout admitted: exit=%d envelope=%+v", code, e)
+			}
+			if after, err := os.ReadFile(left); err != nil || !bytes.Equal(after, raw) {
+				t.Errorf("impossible terminal vout leftover deleted or changed: err=%v bytes=%q", err, after)
+			}
+			if !bytes.Equal(readLedger(t, f.ledger), committed) {
+				t.Error("refusal changed committed ledger")
+			}
+			if got := f.signRun(context.Background(), b); !refusedWith(got, "LEDGER_FILE") {
+				t.Errorf("impossible terminal vout leftover no longer fences sign: exit=%d error=%v", got.code, got.envelope.Error)
+			}
+		})
+	}
+}
+
+// Claim: every field boundary is decided by the set of entries the tail can
+// still become. A grant id prefix of 63 digits whose 16 completions the base
+// all holds refuses, while 15 held admits; a vout prefix whose 11 canonical
+// uint32 completions (42949673 and 429496730-429496739) the base all holds on
+// that txid refuses, while 10 held, or another txid, admits; and a base so
+// large that no entry fits within sealLedgerMax refuses even a prefix of its
+// own bytes, while with room for exactly one vout digit that prefix and a
+// one-digit vout admit and a two-digit vout refuses.
+// Limit: tornWrite in process with constructed bases; the CLI path is
+// TestSealLedgerRecoverTerminalVout.
+func TestTornEntryCompletions(t *testing.T) {
+	next := func(base []SealEntry, tail string) []byte {
+		raw, _ := compactJSON(sealLedgerFile{SealLedgerSchema, base})
+		return append(raw[:len(raw)-2:len(raw)-2], ","+tail...)
+	}
+	hex64 := func(fill string, i int) string {
+		h := strconv.FormatInt(int64(i), 16)
+		return strings.Repeat(fill, 64-len(h)) + h
+	}
+
+	prefix := strings.Repeat("e", 63)
+	var grants []SealEntry
+	for i, d := range "0123456789abcdef" {
+		grants = append(grants, SealEntry{sealA, uint32(i), prefix + string(d)})
+	}
+	tail := `{"txid":"` + sealB + `","vout":7,"grant_id":"` + prefix
+	if tornWrite(next(grants, tail), [][]SealEntry{grants}) {
+		t.Fatal("grant id prefix with no free completion admitted")
+	}
+	if !tornWrite(next(grants[:15], tail), [][]SealEntry{grants[:15]}) || !tornWrite(next(grants[:15], tail+"f"), [][]SealEntry{grants[:15]}) {
+		t.Fatal("grant id prefix with a free completion refused")
+	}
+
+	vouts := []SealEntry{{sealA, 42949673, hex64("a", 0)}}
+	for v := uint32(429496730); v <= 429496739; v++ {
+		vouts = append(vouts, SealEntry{sealA, v, hex64("a", int(v))})
+	}
+	if tornWrite(next(vouts, `{"txid":"`+sealA+`","vout":42949673`), [][]SealEntry{vouts}) {
+		t.Fatal("vout prefix with every completion held admitted")
+	}
+	short := slices.Delete(slices.Clone(vouts), 5, 6)
+	if !tornWrite(next(short, `{"txid":"`+sealA+`","vout":42949673`), [][]SealEntry{short}) || !tornWrite(next(vouts, `{"txid":"`+sealB+`","vout":42949673`), [][]SealEntry{vouts}) {
+		t.Fatal("vout prefix with a free completion refused")
+	}
+
+	// room is the vout digits a next entry may have within sealLedgerMax,
+	// measured on the serializer with a real one-digit entry.
+	room := func(base []SealEntry) int {
+		full, _ := compactJSON(sealLedgerFile{SealLedgerSchema, append(slices.Clone(base), SealEntry{sealB, 5, hex64("d", 0)})})
+		return sealLedgerMax - len(full) + 1
+	}
+	fit := func(want int) []SealEntry {
+		var base []SealEntry
+		for room(base) > want+200 {
+			base = append(base, SealEntry{hex64("0", len(base)), 1, hex64("f", len(base))})
+		}
+		for i := 0; room(base) > want; i++ {
+			base[i].Vout = uint32(pow10(min(9, room(base)-want)))
+		}
+		if room(base) != want {
+			t.Fatalf("fixture room %d, want %d", room(base), want)
+		}
+		return base
+	}
+	full := fit(0)
+	stem := next(full, "")
+	if tornWrite(stem, [][]SealEntry{full}) || tornWrite(stem[:10], [][]SealEntry{full}) {
+		t.Fatal("a prefix of a document past sealLedgerMax admitted")
+	}
+	one := fit(1)
+	if !tornWrite(next(one, ""), [][]SealEntry{one}) || !tornWrite(next(one, `{"txid":"`+sealB+`","vout":5`), [][]SealEntry{one}) {
+		t.Fatal("a prefix of a document within sealLedgerMax refused")
+	}
+	if tornWrite(next(one, `{"txid":"`+sealB+`","vout":12`), [][]SealEntry{one}) {
+		t.Fatal("a vout past sealLedgerMax admitted")
+	}
+}
+
+// Claim: voutCompletions counts exactly the vouts voutIn admits, by brute
+// force over every vout below 10^(room+1) for the empty prefix and every
+// canonical prefix of one or two digits, final or not, with room up to four
+// digits; and it matches hand counts at the uint32 end with room 10.
+// Limit: the brute force agrees with voutIn, whose rule is checked through
+// the CLI in TestSealLedgerRecoverTerminalVout.
+func TestVoutCompletions(t *testing.T) {
+	prefixes := []string{""}
+	for i := 0; i < 100; i++ {
+		prefixes = append(prefixes, strconv.Itoa(i))
+	}
+	for room := 0; room <= 4; room++ {
+		for _, d := range prefixes {
+			for _, final := range []bool{false, true} {
+				if final && d == "" {
+					continue
+				}
+				var n uint64
+				for v := uint32(0); uint64(v) < pow10(room+1); v++ {
+					if voutIn(v, d, final, room) {
+						n++
+					}
+				}
+				if got := voutCompletions(d, final, room); got != n {
+					t.Fatalf("room %d prefix %q final %v: count %d, brute force %d", room, d, final, got, n)
+				}
+			}
+		}
+	}
+	for _, tc := range []struct {
+		d    string
+		want uint64
+	}{{"", 1 << 32}, {"0", 1}, {"4294967295", 1}, {"429496730", 1}, {"429496729", 7}, {"42949673", 11}, {"5", 111111111}, {"4", 111111111 + 294967296}} {
+		if got := voutCompletions(tc.d, false, 10); got != tc.want {
+			t.Fatalf("prefix %q: %d completions, want %d", tc.d, got, tc.want)
+		}
+	}
+}

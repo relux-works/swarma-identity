@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"math"
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -139,8 +141,9 @@ func (l *sealLedger) readLeftover(name string) (leftoverFile, bool) {
 // mid-write. Such a file was never under the ledger name, since a writer syncs
 // its whole file before the exchange, so it holds no seal that a released
 // grant uses. Past the base's own bytes the file must follow the writer's
-// grammar for one entry exactly (see tornEntry); any byte the writer could not
-// have written there makes the file unclassifiable.
+// grammar for one entry exactly, and at least one entry the writer could
+// still have completed it to must be one a writer records (see tornEntry);
+// otherwise the file is unclassifiable.
 func tornWrite(raw []byte, bases [][]SealEntry) bool {
 	empty, _ := compactJSON(SealEntry{})
 	for _, base := range bases {
@@ -149,7 +152,11 @@ func tornWrite(raw []byte, bases [][]SealEntry) bool {
 			continue
 		}
 		stem := full[:len(full)-len(empty)-2] // the document up to where the next entry starts
-		if bytes.HasPrefix(stem, raw) || (bytes.HasPrefix(raw, stem) && tornEntry(raw[len(stem):], base)) {
+		// A writer refuses a document past sealLedgerMax before it writes a
+		// byte. Only the vout varies in width: full holds a one-digit vout
+		// and two empty 64-digit values, so this many vout digits still fit.
+		room := sealLedgerMax - len(full) - 2*64 + 1
+		if (bytes.HasPrefix(stem, raw) && tornEntry(nil, base, room)) || (bytes.HasPrefix(raw, stem) && tornEntry(raw[len(stem):], base, room)) {
 			return true
 		}
 	}
@@ -168,16 +175,16 @@ const (
 var tornEntryGrammar = []string{`{"txid":"`, tornHexValue, `","vout":`, tornVoutValue, `,"grant_id":"`, tornHexValue, `"}]}`}
 
 // tornEntry reports whether tail, the bytes after a base's stem, is a proper
-// prefix of what the writer appends for one new entry and the document close:
-// a txid and a grant id of 64 lower-case hex digits, a vout in canonical
-// decimal no larger than a uint32, and neither the seal nor the grant id
-// already in base, since a sign records only a free seal and a recover merges
-// duplicates away. A tail may stop at any byte of that text; a byte the
-// writer never writes at that position, a value it never writes, or the
-// complete entry and close (a complete document, not a torn write) is not a
-// torn write.
-func tornEntry(tail []byte, base []SealEntry) bool {
-	var e SealEntry
+// prefix of what the writer appends for one new entry and the document close,
+// and that prefix can still be completed to an entry a writer records. The
+// writer writes a txid and a grant id of 64 lower-case hex digits and a vout
+// in canonical decimal no larger than a uint32; a byte the writer never
+// writes at that position, a value it never writes, or the complete entry and
+// close (a complete document, not a torn write) is not a torn write. Where
+// the tail stops, inside a value or after it, what decides is the set of
+// entries it can still become (see permittedCompletion), not that it ends.
+func tornEntry(tail []byte, base []SealEntry, room int) bool {
+	var values []string // the txid, the vout digits and the grant id, as far as tail holds them
 	for _, part := range tornEntryGrammar {
 		n, complete := 0, false
 		switch part {
@@ -194,7 +201,6 @@ func tornEntry(tail []byte, base []SealEntry) bool {
 			if n != 0 && (err != nil || strconv.FormatUint(v, 10) != string(tail[:n])) {
 				return false // a leading zero or a value past uint32: no prefix of a vout the writer writes
 			}
-			e.Vout = uint32(v)
 			complete = n != 0 && n < len(tail) // digits end only where the next part starts
 		default:
 			n = min(len(tail), len(part))
@@ -203,27 +209,105 @@ func tornEntry(tail []byte, base []SealEntry) bool {
 			}
 			complete = n == len(part)
 		}
-		if !complete {
-			return n == len(tail) // the write stopped inside this part; otherwise a byte the writer never writes here follows
+		slot := part == tornHexValue || part == tornVoutValue
+		if slot {
+			values = append(values, string(tail[:n]))
 		}
-		switch part {
-		case tornHexValue:
-			if e.TxID == "" {
-				e.TxID = string(tail[:n])
-			} else {
-				e.GrantID = string(tail[:n])
-				if slices.ContainsFunc(base, func(b SealEntry) bool { return b.GrantID == e.GrantID }) {
-					return false
-				}
-			}
-		case tornVoutValue:
-			if slices.ContainsFunc(base, func(b SealEntry) bool { return b.TxID == e.TxID && b.Vout == e.Vout }) {
-				return false
-			}
+		if !complete {
+			// The write stopped inside this part; otherwise a byte the writer never writes here follows.
+			return n == len(tail) && permittedCompletion(values, slot, base, room)
 		}
 		tail = tail[n:]
 	}
 	return false
+}
+
+// permittedCompletion reports whether at least one entry the writer can still
+// complete values to is one it records: a seal and a grant id that base does
+// not hold, since a sign records only a free seal and a recover merges
+// duplicates away, and a vout that keeps the document within sealLedgerMax
+// (room digits). values holds the txid, the vout digits and the grant id as
+// far as the tail reaches; the last is a prefix when open, and a value the
+// tail does not reach is an empty prefix. Each set is counted, capped just
+// above the base's size, and compared with the base entries it contains;
+// validEntries holds base to distinct seals and grant ids.
+func permittedCompletion(values []string, open bool, base []SealEntry, room int) bool {
+	at := func(i int) (prefix string, final bool) {
+		if i >= len(values) {
+			return "", false
+		}
+		return values[i], i < len(values)-1 || !open
+	}
+	txid, _ := at(0)
+	vout, voutFinal := at(1)
+	grant, _ := at(2)
+	// A set of limit values holds one base does not. The seal product stays
+	// below 2^41: limit is under 2^10 and a vout set under 2^33.
+	limit := uint64(len(base)) + 1
+	seals := min(hexCompletions(len(txid), limit)*voutCompletions(vout, voutFinal, room), limit)
+	grants := hexCompletions(len(grant), limit)
+	var heldSeals, heldGrants uint64
+	for _, b := range base {
+		if strings.HasPrefix(b.TxID, txid) && voutIn(b.Vout, vout, voutFinal, room) {
+			heldSeals++
+		}
+		if strings.HasPrefix(b.GrantID, grant) {
+			heldGrants++
+		}
+	}
+	return seals > heldSeals && grants > heldGrants
+}
+
+// hexCompletions counts the 64-digit lower-case hex values that start with a
+// given n digits, capped at limit.
+func hexCompletions(n int, limit uint64) uint64 {
+	c := uint64(1)
+	for ; n < 64 && c < limit; n++ {
+		c *= 16
+	}
+	return min(c, limit)
+}
+
+// voutCompletions counts the vouts the writer can still write for digits d:
+// the canonical decimal of a uint32 at most room digits long that is d, when
+// d is final, or starts with d. voutIn reports whether v is one of them.
+// TestVoutCompletions checks the two against each other.
+func voutCompletions(d string, final bool, room int) uint64 {
+	if final {
+		if len(d) <= room {
+			return 1
+		}
+		return 0
+	}
+	var prefix, count uint64
+	if d != "" {
+		prefix, _ = strconv.ParseUint(d, 10, 32)
+	}
+	for l := max(len(d), 1); l <= min(10, room); l++ {
+		scale := pow10(l - len(d))
+		lo, hi := prefix*scale, (prefix+1)*scale-1
+		if l > 1 {
+			lo = max(lo, pow10(l-1)) // no leading zero
+		}
+		hi = min(hi, math.MaxUint32)
+		if hi >= lo {
+			count += hi - lo + 1
+		}
+	}
+	return count
+}
+
+func voutIn(v uint32, d string, final bool, room int) bool {
+	s := strconv.FormatUint(uint64(v), 10)
+	return len(s) <= room && (s == d || !final && strings.HasPrefix(s, d))
+}
+
+func pow10(n int) uint64 {
+	p := uint64(1)
+	for ; n > 0; n-- {
+		p *= 10
+	}
+	return p
 }
 
 // mergeEntries returns the union of the ledgers' entries, the first ledger's

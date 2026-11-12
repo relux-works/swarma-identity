@@ -268,9 +268,15 @@ with one link, at most 64 KiB, and one of:
   `{"txid":"<64 hex>","vout":<decimal>,"grant_id":"<64 hex>"}]}`, with
   lower-case hex, a vout in canonical decimal no larger than 4294967295, and
   a seal and grant id not already in that ledger; any other byte, member,
-  value or trailing text is not a torn write. A writer syncs its whole file
-  before the exchange, so such a file was never the ledger, and its extra
-  entry backs no released grant.
+  value or trailing text is not a torn write. Where the file stops, inside a
+  value or after it, it must still be completable to an entry a writer
+  records: at least one completion has a seal and a grant id that ledger does
+  not hold and keeps the document within 64 KiB. A file that stops right
+  after a held seal's txid and a vout of `0`, `4294967295` or `429496730`
+  therefore refuses: ending the number there repeats the seal, and no
+  canonical uint32 continues it. A writer syncs its whole file before the
+  exchange, so such a file was never the ledger, and its extra entry backs no
+  released grant.
 
 Anything else refuses as `LEDGER_FILE` and is kept for the owner. The merge
 is the union of the ledger's and the leftover ledgers' entries and refuses

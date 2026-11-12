@@ -176,17 +176,38 @@ func TestGrantPlantedControls(t *testing.T) {
 		// the r5 heuristic admits any tail with at most one brace; the last
 		// keeps the grammar but admits any byte where a part breaks off.
 		{"ledger-recover-torn-any-length", "facade", "seal_ledger_recover.go",
-			"tornEntry(raw[len(stem):], base)", "true",
+			"tornEntry(raw[len(stem):], base, room)", "true",
 			"^TestSealLedgerRecoverRefusals$", "want LEDGER_FILE", false},
 		{"ledger-recover-torn-any-suffix-owner-witness", "facade", "seal_ledger_recover.go",
-			"tornEntry(raw[len(stem):], base)", "true",
+			"tornEntry(raw[len(stem):], base, room)", "true",
 			"^TestReviewPR8RecoverRejectsImpossibleTornWrite$", "unclassifiable leftover admitted", false},
 		{"ledger-recover-torn-brace-count-r5-owner-witness", "facade", "seal_ledger_recover.go",
-			"tornEntry(raw[len(stem):], base)", `bytes.Count(raw[len(stem):], []byte("{")) <= 1`,
+			"tornEntry(raw[len(stem):], base, room)", `bytes.Count(raw[len(stem):], []byte("{")) <= 1`,
 			"^TestReviewPR8RecoverRejectsImpossibleTornWrite$", "unclassifiable leftover admitted", false},
 		{"ledger-recover-torn-any-next-byte", "facade", "seal_ledger_recover.go",
 			"return n == len(tail)", "return true",
 			"^TestTornEntryGrammar$", "admitted a byte the writer never writes", false},
+		// r7: a torn entry is admitted only when some completion is an entry
+		// a writer records. The first restores the r6 EOF acceptance of a
+		// vout, keeping the duplicate check once a delimiter follows; the
+		// second does the same for a hex value; the vout set rows let a
+		// completion take a leading zero or pass uint32; the last drops the
+		// sealLedgerMax bound on the completed document.
+		{"ledger-recover-torn-vout-eof-r6-review-witness", "facade", "seal_ledger_recover.go",
+			"return n == len(tail) && permittedCompletion(values, slot, base, room)", "return n == len(tail) && (part == tornVoutValue || permittedCompletion(values, slot, base, room))",
+			"^TestSealLedgerRecoverTerminalVout$", "impossible terminal vout admitted", false},
+		{"ledger-recover-torn-hex-eof", "facade", "seal_ledger_recover.go",
+			"return n == len(tail) && permittedCompletion(values, slot, base, room)", "return n == len(tail) && (part == tornHexValue || permittedCompletion(values, slot, base, room))",
+			"^TestTornEntryCompletions$", "grant id prefix with no free completion admitted", false},
+		{"ledger-recover-vout-leading-zero-completion", "facade", "seal_ledger_recover.go",
+			"lo = max(lo, pow10(l-1))", "lo = max(lo, 0)",
+			"^TestSealLedgerRecoverTerminalVout$", "impossible terminal vout admitted", false},
+		{"ledger-recover-vout-past-uint32-completion", "facade", "seal_ledger_recover.go",
+			"hi = min(hi, math.MaxUint32)", "hi = min(hi, math.MaxUint32*10)",
+			"^TestSealLedgerRecoverTerminalVout$", "impossible terminal vout admitted", false},
+		{"ledger-recover-no-size-bound", "facade", "seal_ledger_recover.go",
+			"room := sealLedgerMax - len(full) - 2*64 + 1", "room := 10",
+			"^TestTornEntryCompletions$", "a prefix of a document past sealLedgerMax admitted", false},
 		// r6: recover reads the union back before it removes a leftover,
 		// whether or not it restored entries.
 		{"ledger-recover-no-readback", "facade", "seal_ledger_recover.go",
