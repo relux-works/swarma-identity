@@ -30,7 +30,18 @@ It does not protect against:
 - A compromised macOS or a compromised `swarma-keychain` build. Build the tool from a reviewed commit on the Mac itself.
 - Loss of the item. There is no export and no backup; see [Recovery](#recovery).
 
-Residual exposure in memory: the secret is copied into a Go buffer and a btcec scalar for one signature, and both are zeroed right after. The buffer passed to `SecItemAdd` is wiped when it is freed. The copy that Security.framework returns from a read is released without being overwritten, because it is owned by the framework.
+### Secret material in memory
+
+`internal/keysign` does not call the library signers. btcec v2.3.5's `schnorr.Sign` copies the private scalar and its bytes into locals it never clears, and the ECDSA path (`ecdsa.Sign` → RFC 6979 in dcrd secp256k1 v4.4.0) leaves the key in the HMAC input buffer and HMAC state and takes the nonce inverse through `math/big`. The package instead implements BIP-340 signing (with fresh 32-byte `aux_rand` from the OS CSPRNG per signature) and RFC 6979 low-S ECDSA itself, over btcec's `ModNScalar` and `JacobianPoint` primitives, and verifies every result with the library's `schnorr` / `ecdsa` verification before it leaves the package.
+
+Every secret-bearing value of one operation lives in one heap-allocated `scratch`: the 32 key bytes, the scalar and its bytes, `aux`, `t`, `rand`, the RFC 6979 seed and HMAC_DRBG `K`/`V`, the nonce and its inverse, the products that mix the key into `s`, the bytes and running sum of each `k·G` multiplication, the k·G and d·G points, and the SHA-256 and HMAC states that consume secret input. The scalar multiplication by G (double-and-add), the inverse (Fermat, `k^(n-2)`), SHA-256 and HMAC-SHA256 are implemented in the package so that their state is in that struct. The scratch is wiped by a `defer` placed right after it is allocated, so it is cleared on every return path. `TestScratchClearedOnEveryReturn` reads each scratch after the public call returned, on success and on every refusal path, and finds every field zero; it also checks that each field was in use before the wipe. The implementation is pinned to the library by all BIP-340 signing vectors (0..3, 15..18), btcec's RFC 6979 vectors, and a byte-for-byte comparison with `schnorr.Sign`/`ecdsa.Sign` on random inputs.
+
+What this does not reach, stated as limits of Go:
+- **Library stack frames and registers.** The field and scalar arithmetic (`ModNScalar.Mul2`/`Square`/`Add`, `FieldVal` operations inside `AddNonConst`, `DoubleNonConst` and `ToAffine`) and the package's own SHA-256 round function work on intermediates in their own stack frames and in CPU registers. Go offers no way to clear another frame or the register file. These are arithmetic intermediates, not a whole copy of the key or the nonce, but they are derived from them and are left until the stack is reused.
+- **Stack copying.** When a goroutine's stack grows, the runtime copies it and frees the old one without zeroing it. The scratch is on the heap, so it is not copied; the intermediates above can be.
+- **The heap.** Go's collector does not move objects, so the scratch is not duplicated by the GC, and it is zero before it becomes garbage. Freed memory is not zeroed until reused.
+- **Timing.** Like the btcec routines it replaces (`…NonConst`), the multiplication by G branches on the scalar's bits. The threat model above does not include a local timing attacker.
+- **The Keychain read.** The buffer passed to `SecItemAdd` is wiped when it is freed. The copy that Security.framework returns from a read is released without being overwritten, because the framework owns it; the Go copy made from it is the scratch's key bytes.
 
 ## Commands
 
@@ -53,17 +64,17 @@ Residual exposure in memory: the secret is copied into a Go buffer and a btcec s
   "landlord_sig": "required for grant_signing_hash",
   "seal_spend": {
     "tx_hex": "<unsigned tx, no witness>", "input_index": 0,
-    "prevouts": [ {"script_hex":"…","amount_sat":0} ]
+    "prevouts": [ {"script_hex":"…","amount_sat":0,"prev_tx_hex":"optional full previous tx"} ]
   }
 }
 ```
 
 - `to_sign` entries are copied from PR 8's output: `grant draft` and `grant consent` give `contract_sha256`, and `grant sign` stage `grant_hash` gives `grant_signing_hash`. Only `signer:"landlord"` entries are accepted, and their key must be this item's key. The draft's `issuer_key` must also be this key, otherwise the request is refused with `KEY_MISMATCH`.
 - `seal_spend` is optional and takes exactly one of two forms:
-  - `tx_hex` with one prevout per input. A legacy sighash does not commit to amounts, so the display marks those amounts as supplied by the request.
-  - `psbt_b64` with no `prevouts`. Every PSBT input must carry its full previous transaction, whose hash must equal the outpoint's txid; the amounts are then verified.
+  - `tx_hex` with one prevout per input. A legacy sighash does not commit to amounts, so the display marks those amounts as supplied by the request. A prevout may carry `prev_tx_hex`, the full previous transaction; it must hash to the input's txid, and its output must have exactly the supplied script and amount (`SEAL_SPEND_PREVOUTS` otherwise). The display then marks that amount as read from the previous transaction.
+  - `psbt_b64` with no `prevouts`. Every PSBT input must carry its full previous transaction, whose hash must equal the outpoint's txid; the amounts are then verified. A witness UTXO given beside it must agree with that output in amount and script (`SEAL_SPEND_PREVOUTS` otherwise).
 
-  The transaction must be unsigned and must not create value. The input at `input_index` must be the draft's seal outpoint, and its prevout must be P2PKH to this key.
+  The transaction must be unsigned, must not spend any outpoint twice (`SEAL_SPEND_DUPLICATE_INPUT`, checked before any amount is summed) and must not create value. The input at `input_index` must be the draft's seal outpoint, and its prevout must be P2PKH to this key.
 - `to_sign` may be empty only when `seal_spend` is present.
 
 The terminal shows the following before the confirmation prompt:
@@ -75,7 +86,7 @@ The terminal shows the following before the confirmation prompt:
 - the contract SHA-256, actions, repos and note
 - the seal outpoint
 - each requested purpose and digest
-- for a seal spend: the unsigned txid, every input (outpoint, amount, script or address, with the signed input marked), every output (amount and address or script), totals, fee, locktime and sighash.
+- for a seal spend, every field the legacy SIGHASH_ALL digest commits to: the transaction version; every input's outpoint and sequence (decimal and hex), with the signed input marked; every prevout's script in hex (the signed input's is its script code) with its amount, its address where standard, and whether the amount was read from a previous transaction; every output's amount, address where standard, and script in hex; the locktime; the sighash type (`SIGHASH_ALL (0x01)`); and the unsigned txid, totals, fee and sighash. `TestSealDisplayCoversEverySighashField` derives these fields from the transaction and finds each in the display.
 
 Free text, such as the contract note, is shown with control and non-ASCII characters escaped.
 
@@ -113,7 +124,7 @@ Nothing below runs before the sitting. Build the tool on Ivan's Mac from the rev
 ```sh
 git clone https://github.com/relux-works/swarma-identity && cd swarma-identity
 git checkout <reviewed commit>
-mkdir -p .temp/bin && go build -o .temp/bin/swarma-keychain ./cmd/swarma-keychain
+mkdir -p .temp/bin && go build -o .temp/bin/swarma-keychain ./cmd/swarma-keychain && go build -o .temp/bin/swarma-identity ./cmd/swarma-identity
 ```
 
 1. **Dry run with a throwaway label, then the real key.** The dry run checks Touch ID and the entitlement path:
@@ -125,9 +136,9 @@ mkdir -p .temp/bin && go build -o .temp/bin/swarma-keychain ./cmd/swarma-keychai
    .temp/bin/swarma-keychain keychain keygen --label ivanopcode-grant-1 --json
    ```
    Record `xonly_key`, `compressed_pubkey` and `p2pkh_address`. Nothing secret is printed.
-2. **Build the new landlord value.** Extract the current `nostr` descriptor of `id/ivanopcode` with `swarma-identity name show` (`value_hex` → bytes → `.nostr`) into `social.json`, then:
+2. **Build the new landlord value.** Extract the current `nostr` descriptor of `id/ivanopcode` with `.temp/bin/swarma-identity name show` (`value_hex` → bytes → `.nostr`) into `social.json`, then:
    ```sh
-   swarma-identity value build --grant-xonly <xonly_key> --social-descriptor social.json --json
+   .temp/bin/swarma-keychain value build --grant-xonly <xonly_key> --social-descriptor social.json --json
    ```
    Hand `value_hex` to the lead node. The lead node decodes it, runs `testmempoolaccept` and broadcasts the `name_update` once.
 3. **Sign grants with the new key, after the name_update confirms.** Run `grant draft` and `grant consent` as before. Put the draft and the `to_sign` entries into a `swarma-keychain/sign/1` request and run:
@@ -150,7 +161,7 @@ Evidence so far, from hosted CI run 43322768154 on macOS 15: an ad-hoc-signed te
 
 | Where | What |
 | --- | --- |
-| any platform | BIP-340 signing vectors 0..3; ECDSA low-S against the high-S twin; the legacy sighash against an independent implementation; keygen refusals; display before key read; refusal on decline; 12 digest-binding refusals; seal-spend refusals and a PSBT positive control; secret scan over all outputs and fds; value build vector and refusals; binary closure |
+| any platform | all BIP-340 signing vectors (0..3, 15..18) and btcec's RFC 6979 vectors through the package's own signers; byte-for-byte agreement with the library signers on random inputs; the wipeable SHA-256/HMAC, k·G and inverse against the standard library and btcec; every scratch field zero after each signer call returns (success and refusal paths); ECDSA low-S against the high-S twin; duplicate inputs refused in both encodings; supplied prevouts that disagree with a full previous transaction refused; every sighash-committed field in the display; the legacy sighash against an independent implementation; keygen refusals; display before key read; refusal on decline; 12 digest-binding refusals; seal-spend refusals and a PSBT positive control; secret scan over all outputs and fds; value build vector and refusals; binary closure |
 | macOS CI, tag `keychaintest` | a throwaway file keychain made by `security create-keychain` in the job (never the login keychain): store round trip, duplicate label, path guard; keygen → sign → PR 8 `grant sign` end to end |
 | macOS CI, release build | release-store preflight refuses on the runner (no biometry); a read-only lookup of a random label returns no item |
 | CI Build step | release `swarma-keychain` and `swarma-identity` binaries do not contain the test keychain selector (positive control: the `keychaintest` build does) |
