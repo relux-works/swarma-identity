@@ -30,6 +30,8 @@ The auth file contains `username:password` (including the node's cookie format),
 
 `name show --config FILE --request FILE --json` accepts exactly `{"name":"d/example"}`. Names are 1..255 UTF-8 bytes and are sent without normalization. The RPC explicitly selects UTF-8 names, hex values and expired-record visibility. Active results contain `name,value_hex,expires_in,expired,txid,vout,height,observed_tip`. Hex values represent at most 520 bytes. Missing and expired names are distinct refusals. This raw read does not establish Link, Nostr, domain or identity authority.
 
+Name reads compare the preflight tip hash with a hash sampled after `name_show`. A changed hash gives `SNAPSHOT_CHANGED`, including a reorganization at the same height. Equal endpoint hashes do not prove an atomic snapshot: the tip could move A → B → A between observations. This interface cannot detect every intermediate change and does not claim that it can. The provider's `expired` flag must equal `expires_in <= 0`; contradictory fields are `PROVIDER_PROTOCOL` before the final tip read.
+
 `address derive --request FILE --json` works entirely offline:
 
 ```json
