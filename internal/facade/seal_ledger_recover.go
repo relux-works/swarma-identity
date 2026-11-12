@@ -29,9 +29,10 @@ type leftoverFile struct {
 // RecoverSealLedger clears the recovery fence. Under the exclusive lock it
 // reads the ledger and every leftover temporary file and classifies each
 // leftover: an empty file; a complete ledger document, whose entries are
-// merged into the ledger; or a torn write, a prefix of a ledger document that
-// extends the ledger or a leftover ledger by at most one entry, which a
-// writer had not committed. Any other leftover refuses as LEDGER_FILE. The
+// merged into the ledger; or a torn write, a proper prefix of the bytes the
+// writer serializes for the ledger or a leftover ledger extended by at most
+// one entry, which a writer had not committed (see tornWrite). Any other
+// leftover refuses as LEDGER_FILE and is kept, so the fence holds. The
 // merge is the union of entries and refuses as LEDGER_RECOVERY_CONFLICT when
 // one seal maps to two grant ids or one grant id to two seals. A union larger
 // than the ledger is committed by the same exchange protocol as a sign; the
@@ -87,6 +88,9 @@ func RecoverSealLedger(ctx context.Context, path string) (*LedgerRecoverResult, 
 			return nil, f
 		}
 	}
+	if ledgerStep("readback") != nil {
+		return nil, refuse("LEDGER_FILE")
+	}
 	if !l.verify(union) {
 		return nil, refuse("LEDGER_FILE")
 	}
@@ -129,11 +133,14 @@ func (l *sealLedger) readLeftover(name string) (leftoverFile, bool) {
 	return lf, true
 }
 
-// tornWrite reports whether raw, which is not a complete ledger, is a prefix
-// of a ledger document that extends one of bases by at most one entry: the
-// bytes a writer that read that base left when it stopped mid-write. Such a
-// file was never under the ledger name, since a writer syncs its whole file
-// before the exchange, so it holds no seal that a released grant uses.
+// tornWrite reports whether raw, which is not a complete ledger, is a proper
+// prefix of the bytes the writer serializes for one of bases extended by at
+// most one entry: the bytes a writer that read that base left when it stopped
+// mid-write. Such a file was never under the ledger name, since a writer syncs
+// its whole file before the exchange, so it holds no seal that a released
+// grant uses. Past the base's own bytes the file must follow the writer's
+// grammar for one entry exactly (see tornEntry); any byte the writer could not
+// have written there makes the file unclassifiable.
 func tornWrite(raw []byte, bases [][]SealEntry) bool {
 	empty, _ := compactJSON(SealEntry{})
 	for _, base := range bases {
@@ -142,9 +149,79 @@ func tornWrite(raw []byte, bases [][]SealEntry) bool {
 			continue
 		}
 		stem := full[:len(full)-len(empty)-2] // the document up to where the next entry starts
-		if bytes.HasPrefix(stem, raw) || (bytes.HasPrefix(raw, stem) && bytes.Count(raw[len(stem):], []byte("{")) <= 1) {
+		if bytes.HasPrefix(stem, raw) || (bytes.HasPrefix(raw, stem) && tornEntry(raw[len(stem):], base)) {
 			return true
 		}
+	}
+	return false
+}
+
+// Value slots in tornEntryGrammar; neither occurs in a literal part.
+const (
+	tornHexValue  = "\x00hex"
+	tornVoutValue = "\x00vout"
+)
+
+// tornEntryGrammar is what compactJSON writes for one SealEntry followed by
+// the document close, split at the entry's values: the txid, the vout and the
+// grant id. TestTornEntryGrammar pins it to the serializer's output.
+var tornEntryGrammar = []string{`{"txid":"`, tornHexValue, `","vout":`, tornVoutValue, `,"grant_id":"`, tornHexValue, `"}]}`}
+
+// tornEntry reports whether tail, the bytes after a base's stem, is a proper
+// prefix of what the writer appends for one new entry and the document close:
+// a txid and a grant id of 64 lower-case hex digits, a vout in canonical
+// decimal no larger than a uint32, and neither the seal nor the grant id
+// already in base, since a sign records only a free seal and a recover merges
+// duplicates away. A tail may stop at any byte of that text; a byte the
+// writer never writes at that position, a value it never writes, or the
+// complete entry and close (a complete document, not a torn write) is not a
+// torn write.
+func tornEntry(tail []byte, base []SealEntry) bool {
+	var e SealEntry
+	for _, part := range tornEntryGrammar {
+		n, complete := 0, false
+		switch part {
+		case tornHexValue:
+			for n < len(tail) && n < 64 && (tail[n] >= '0' && tail[n] <= '9' || tail[n] >= 'a' && tail[n] <= 'f') {
+				n++
+			}
+			complete = n == 64
+		case tornVoutValue:
+			for n < len(tail) && tail[n] >= '0' && tail[n] <= '9' {
+				n++
+			}
+			v, err := strconv.ParseUint(string(tail[:n]), 10, 32)
+			if n != 0 && (err != nil || strconv.FormatUint(v, 10) != string(tail[:n])) {
+				return false // a leading zero or a value past uint32: no prefix of a vout the writer writes
+			}
+			e.Vout = uint32(v)
+			complete = n != 0 && n < len(tail) // digits end only where the next part starts
+		default:
+			n = min(len(tail), len(part))
+			if string(tail[:n]) != part[:n] {
+				return false
+			}
+			complete = n == len(part)
+		}
+		if !complete {
+			return n == len(tail) // the write stopped inside this part; otherwise a byte the writer never writes here follows
+		}
+		switch part {
+		case tornHexValue:
+			if e.TxID == "" {
+				e.TxID = string(tail[:n])
+			} else {
+				e.GrantID = string(tail[:n])
+				if slices.ContainsFunc(base, func(b SealEntry) bool { return b.GrantID == e.GrantID }) {
+					return false
+				}
+			}
+		case tornVoutValue:
+			if slices.ContainsFunc(base, func(b SealEntry) bool { return b.TxID == e.TxID && b.Vout == e.Vout }) {
+				return false
+			}
+		}
+		tail = tail[n:]
 	}
 	return false
 }

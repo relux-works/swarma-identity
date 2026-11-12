@@ -262,10 +262,15 @@ with one link, at most 64 KiB, and one of:
 
 - empty;
 - a complete ledger document with valid entries, whose entries are merged;
-- a torn write: a prefix of the ledger document a writer was writing, that
-  is the ledger or a leftover ledger extended by at most one entry. A writer
-  syncs its whole file before the exchange, so such a file was never the
-  ledger, and its extra entry backs no released grant.
+- a torn write: a proper prefix of the exact bytes the writer serializes for
+  the ledger or a leftover ledger extended by at most one entry. Past that
+  ledger's own entries the file may stop at any byte of
+  `{"txid":"<64 hex>","vout":<decimal>,"grant_id":"<64 hex>"}]}`, with
+  lower-case hex, a vout in canonical decimal no larger than 4294967295, and
+  a seal and grant id not already in that ledger; any other byte, member,
+  value or trailing text is not a torn write. A writer syncs its whole file
+  before the exchange, so such a file was never the ledger, and its extra
+  entry backs no released grant.
 
 Anything else refuses as `LEDGER_FILE` and is kept for the owner. The merge
 is the union of the ledger's and the leftover ledgers' entries and refuses

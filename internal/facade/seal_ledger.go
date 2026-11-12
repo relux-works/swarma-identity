@@ -68,8 +68,9 @@ type sealLedger struct {
 }
 
 // ledgerHook is nil in production. Tests set it to act at a named step
-// ("walked", "locked", "loaded", "write", "rename"); an error it returns
-// fails that step.
+// ("walked", "locked", "loaded", "write", "rename", and "readback" in a
+// recover just before it reads the committed ledger back); an error it
+// returns fails that step.
 var ledgerHook func(step string) error
 
 func ledgerStep(step string) error {
