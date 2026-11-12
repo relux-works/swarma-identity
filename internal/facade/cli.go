@@ -45,7 +45,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	f := fail("BAD_INPUT")
 	if len(args) >= 2 {
 		switch args[0] + " " + args[1] {
-		case "node health", "name show", "address derive", "balance watch":
+		case "node health", "name show", "address derive", "balance watch", "nostr profile-prepare", "nostr profile-verify":
 			e.Command = args[0] + " " + args[1]
 			e.Network, e.Result, f = execute(ctx, e.Command, args[2:])
 		}
@@ -70,7 +70,8 @@ func execute(ctx context.Context, command string, args []string) (string, any, *
 	flags.SetOutput(io.Discard)
 	jsonOutput := flags.Bool("json", false, "")
 	var configPath, requestPath, mode string
-	if command != "address derive" {
+	offline := command == "address derive" || command == "nostr profile-prepare" || command == "nostr profile-verify"
+	if !offline {
 		flags.StringVar(&configPath, "config", "", "")
 	}
 	if command != "node health" {
@@ -101,6 +102,22 @@ func execute(ctx context.Context, command string, args []string) (string, any, *
 	}
 	if flags.Parse(args) != nil || flags.NArg() != 0 || !*jsonOutput {
 		return "", nil, fail("BAD_INPUT")
+	}
+	if command == "nostr profile-prepare" {
+		var r NostrPrepareRequest
+		if f := inputFile(requestPath, &r); f != nil {
+			return "", nil, f
+		}
+		result, f := PrepareNostrProfile(r)
+		return "", result, f
+	}
+	if command == "nostr profile-verify" {
+		var r NostrVerifyRequest
+		if f := inputFile(requestPath, &r); f != nil {
+			return "", nil, f
+		}
+		result, f := VerifyNostrProfile(r)
+		return "", result, f
 	}
 	if command == "address derive" {
 		var r DeriveRequest

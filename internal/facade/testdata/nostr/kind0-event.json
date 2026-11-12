@@ -1,0 +1,9 @@
+{
+  "id": "33f5b4e6a38e107638c20f4536db35191d4b8651ba5a2cefec983b9ec2d65084",
+  "pubkey": "aa4fc8665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4",
+  "created_at": 1704645586,
+  "kind": 0,
+  "tags": [],
+  "content": "{\"name\":\"Key A\"}",
+  "sig": "285d090f45a6adcae717b33771149f7840a8c27fb29025d63f1ab8d95614034a54e9f4f29cee9527c4c93321a7ebff287387b7a19ba8e6f764512a40e7120429"
+}

@@ -1,0 +1,7 @@
+# Public Nostr verification fixtures
+
+The kind-0 event is a neutral `Key A` metadata fixture extracted unchanged from [rust-nostr/nostr](https://github.com/rust-nostr/nostr/blob/4904ffb85f60178375a1dda659a61793f36f03b8/database/nostr-database-test-suite/src/lib.rs), commit `4904ffb85f60178375a1dda659a61793f36f03b8`, source SHA-256 `87d98cb8a09bc81512dbc3a00f28b68fd0b652f9806b36833ab47490a27173a6`. Its canonical id was cross-checked independently and its existing BIP-340 signature verified. No signature or key was generated.
+
+The verification-only vectors come from [the official BIP-340 corpus](https://github.com/bitcoin/bips/blob/b34d9f751791d4feb22feff4f2ed00bcac83961b/bip-0340/test-vectors.csv), commit `b34d9f751791d4feb22feff4f2ed00bcac83961b`, original file SHA-256 `34c9d1d9c3a88d524bc80778540dc43f8306ec249a7485293063c376db851c2d`. The projection contains only index, public key, message, signature, expected verification result and comment. It omits secret and auxiliary-randomness columns. Only 32-byte-message rows apply to the event-id verifier.
+
+`canonical.json` freezes exact UTF-8 bytes and SHA-256 ids derived from the pinned [NIP-01 serialization contract](https://github.com/nostr-protocol/nips/blob/98b57cf3e76f5de64a563350d437328e5d7a8f73/01.md). Golden bytes were independently hashed with `shasum -a 256`; tests do not obtain their expected ids from the implementation under test. These synthetic inputs establish bounded encoding and verification behavior, not relay publication or identity authority.

@@ -29,6 +29,12 @@ func fail(code string) *Failure {
 	case "NAME_NOT_FOUND":
 		f.Exit = 3
 		f.Message = "The requested name was not found."
+	case "EVENT_ID_MISMATCH":
+		f.Exit = 3
+		f.Message = "The supplied event id does not match its canonical fields."
+	case "INVALID_SIGNATURE":
+		f.Exit = 3
+		f.Message = "The supplied event signature is not valid for its public key and event id."
 	case "SCAN_BUSY", "SNAPSHOT_CHANGED":
 		f.Exit = 4
 		f.Retryable = true
