@@ -142,9 +142,9 @@ There is none. The item is device-bound and biometry-bound: it cannot be exporte
 
 ## Open item: code signing for the data protection keychain
 
-macOS gives the data protection keychain only to code signed with a keychain-access-group entitlement. An unsigned or ad-hoc-signed `go build` binary is refused there with `errSecMissingEntitlement` (-34018), which the tool reports as `KEYCHAIN_ENTITLEMENT`.
+Biometry access control exists only in the data protection keychain. macOS may require a keychain-access-group entitlement there, which an ad-hoc `go build` binary does not have. In that case, writing the item fails with `errSecMissingEntitlement` (-34018), which the tool reports as `KEYCHAIN_ENTITLEMENT`.
 
-The hosted CI cannot show this, because it has no Touch ID and never writes to that keychain. The dry run in step 1 is where it is decided. If keygen returns `KEYCHAIN_ENTITLEMENT`, the binary must be signed with Ivan's Apple developer identity and an entitlement. That needs a decision from Ivan and the leads; see `UNRESOLVED_QUESTIONS.md`.
+Evidence so far, from hosted CI run 43322768154 on macOS 15: an ad-hoc-signed test binary's read-only lookup of a random label in the data protection keychain returned `KEY_NOT_FOUND`, not the entitlement error. Whether `SecItemAdd` with the biometry access control succeeds for an unsigned binary is not established, because CI has no Touch ID and never writes there. The dry run in step 1 settles it. If keygen returns `KEYCHAIN_ENTITLEMENT`, the binary needs to be signed with an entitlement (see `UNRESOLVED_QUESTIONS.md`).
 
 ## Tests
 
