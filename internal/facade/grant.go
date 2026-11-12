@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"slices"
 	"strings"
 	"time"
 
@@ -357,13 +356,9 @@ func (c *Client) SignGrant(ctx context.Context, r GrantSignRequest, ledgerPath s
 	if !sigValid(onChain, d.ContractSHA256, r.LandlordSig) {
 		return nil, refuse("LANDLORD_SIGNATURE")
 	}
-	g := rental.Grant{Version: 3, Network: d.Network, Genesis: d.Genesis, AgentName: d.AgentName, LandlordName: d.LandlordName, IssuerKey: onChain, GranteeKey: d.GranteeKey, GranteeName: d.GranteeName, ContractSHA256: d.ContractSHA256, Scope: slices.Clone(d.Scope), NotBefore: d.NotBefore, NotAfter: d.NotAfter, Seal: d.Seal, Consent: rental.GrantConsent{ContractSHA256: d.ContractSHA256, ConsentEvent: r.ConsentEvent, LandlordSig: r.LandlordSig}}
-	if d.Budget != 0 {
-		budget := d.Budget
-		g.Budget = &budget
-	}
-	if code := bindTrustContract(raw, trustGrantView{g.Network, g.AgentName, g.LandlordName, g.GranteeKey, g.ContractSHA256, g.Scope, g.BudgetSat(), g.NotBefore, g.NotAfter, g.Consent.ConsentEvent.Tags}); code != "" {
-		return nil, refuse(code)
+	g, f := assembleGrant(d, raw, r.ConsentEvent, r.LandlordSig, onChain)
+	if f != nil {
+		return nil, f
 	}
 	unsigned, err := g.Canonical()
 	if err != nil {

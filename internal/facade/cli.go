@@ -41,6 +41,10 @@ func inputFile(path string, dst any) *Failure {
 // Run writes exactly one closed JSON envelope. Flag, file and provider errors
 // never echo user input, paths, cookies or raw provider messages.
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	return run(ctx, args, stdout, stderr, keychainDeps{terminal: openTTY})
+}
+
+func run(ctx context.Context, args []string, stdout, stderr io.Writer, deps keychainDeps) int {
 	e := Envelope{Schema: ResultSchema}
 	f := fail("BAD_INPUT")
 	if len(args) >= 2 {
@@ -48,6 +52,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		case "node health", "name show", "identity show", "address derive", "balance watch", "nostr profile-prepare", "nostr profile-verify", "grant draft", "grant consent", "grant sign", "grant ledger-recover":
 			e.Command = args[0] + " " + args[1]
 			e.Network, e.Result, f = execute(ctx, e.Command, args[2:])
+		case "keychain keygen", "keychain sign", "value build":
+			e.Command = args[0] + " " + args[1]
+			e.Network, e.Result, f = executeKeychain(ctx, e.Command, args[2:], deps)
 		}
 	}
 	e.Error = f

@@ -11,7 +11,7 @@ permissions:
 jobs:
   validate:
     runs-on: macos-15
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -21,6 +21,20 @@ jobs:
           cache: true
       - name: Test
         run: GOTOOLCHAIN=local GOMAXPROCS=2 go test -p 1 -parallel 1 ./...
+      - name: Keychain tests (throwaway test keychain, no biometry)
+        if: ${{ !cancelled() && steps.go.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          KC="$RUNNER_TEMP/swarma-test-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.keychain-db"
+          PW="$(openssl rand -hex 16)"
+          security create-keychain -p "$PW" "$KC"
+          trap 'security delete-keychain "$KC"' EXIT
+          security set-keychain-settings "$KC"
+          security unlock-keychain -p "$PW" "$KC"
+          SWARMA_KEYCHAIN_TEST_PATH="$KC" GOTOOLCHAIN=local GOMAXPROCS=2 go test -tags keychaintest -p 1 -count=1 -v -run 'TestTestKeychain|TestKeychainDarwin' ./internal/keychain/ ./internal/facade/
+      - name: Release Keychain store on the runner
+        if: ${{ !cancelled() && steps.go.outcome == 'success' }}
+        run: GOTOOLCHAIN=local GOMAXPROCS=2 go test -count=1 -v -run 'TestReleaseStoreOnRunner' ./internal/keychain/
       - name: Static checks
         if: ${{ !cancelled() && steps.go.outcome == 'success' }}
         run: GOTOOLCHAIN=local GOMAXPROCS=2 go vet -p 1 ./...
@@ -29,3 +43,10 @@ jobs:
         run: |
           mkdir -p .temp/bin
           GOTOOLCHAIN=local GOMAXPROCS=2 go build -p 1 -o .temp/bin/swarma-identity ./cmd/swarma-identity
+          GOTOOLCHAIN=local GOMAXPROCS=2 go build -p 1 -o .temp/bin/swarma-keychain ./cmd/swarma-keychain
+          GOTOOLCHAIN=local GOMAXPROCS=2 go build -p 1 -tags keychaintest -o .temp/bin/swarma-keychain-testmode ./cmd/swarma-keychain
+          # Control: the test-mode build carries the test keychain selector;
+          # the release binaries must not.
+          grep -q SWARMA_KEYCHAIN_TEST_PATH .temp/bin/swarma-keychain-testmode
+          if grep -q SWARMA_KEYCHAIN_TEST_PATH .temp/bin/swarma-keychain .temp/bin/swarma-identity; then echo "release binary carries the test keychain"; exit 1; fi
+          rm .temp/bin/swarma-keychain-testmode
