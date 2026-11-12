@@ -45,7 +45,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	f := fail("BAD_INPUT")
 	if len(args) >= 2 {
 		switch args[0] + " " + args[1] {
-		case "node health", "name show", "identity show", "address derive", "balance watch", "nostr profile-prepare", "nostr profile-verify", "grant draft", "grant consent", "grant sign":
+		case "node health", "name show", "identity show", "address derive", "balance watch", "nostr profile-prepare", "nostr profile-verify", "grant draft", "grant consent", "grant sign", "grant ledger-recover":
 			e.Command = args[0] + " " + args[1]
 			e.Network, e.Result, f = execute(ctx, e.Command, args[2:])
 		}
@@ -70,17 +70,17 @@ func execute(ctx context.Context, command string, args []string) (string, any, *
 	flags.SetOutput(io.Discard)
 	jsonOutput := flags.Bool("json", false, "")
 	var configPath, requestPath, mode, ledgerPath string
-	offline := command == "address derive" || command == "nostr profile-prepare" || command == "nostr profile-verify" || command == "grant consent"
+	offline := command == "address derive" || command == "nostr profile-prepare" || command == "nostr profile-verify" || command == "grant consent" || command == "grant ledger-recover"
 	if !offline {
 		flags.StringVar(&configPath, "config", "", "")
 	}
-	if command != "node health" {
+	if command != "node health" && command != "grant ledger-recover" {
 		flags.StringVar(&requestPath, "request", "", "")
 	}
 	if command == "balance watch" {
 		flags.StringVar(&mode, "mode", "utxo-scan", "")
 	}
-	if command == "grant draft" || command == "grant sign" {
+	if command == "grant draft" || command == "grant sign" || command == "grant ledger-recover" {
 		flags.StringVar(&ledgerPath, "seal-ledger", "", "")
 	}
 	// The command interface accepts long options once, not positional arguments
@@ -105,6 +105,10 @@ func execute(ctx context.Context, command string, args []string) (string, any, *
 	}
 	if flags.Parse(args) != nil || flags.NArg() != 0 || !*jsonOutput {
 		return "", nil, fail("BAD_INPUT")
+	}
+	if command == "grant ledger-recover" {
+		result, f := RecoverSealLedger(ctx, ledgerPath)
+		return "", result, f
 	}
 	if command == "nostr profile-prepare" {
 		var r NostrPrepareRequest

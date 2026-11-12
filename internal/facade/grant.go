@@ -263,14 +263,18 @@ func (c *Client) DraftGrant(ctx context.Context, r GrantDraftRequest, ledgerPath
 	if r.ConsentCreatedAt < 1 || r.ConsentCreatedAt >= r.NotAfter {
 		return nil, refuse("CONSENT_TIME")
 	}
-	ledger, f := openSealLedger(ctx, ledgerPath, false)
+	// The shared ledger lock is held only for the read, bounded like a sign.
+	lockCtx, lockCancel := context.WithTimeout(ctx, grantSignBound)
+	ledger, f := openSealLedger(lockCtx, ledgerPath, false)
+	lockCancel()
 	if f != nil {
 		return nil, f
 	}
-	defer ledger.close()
 	if ledger.lookup(r.Seal.TxID, r.Seal.Vout) != "" {
+		ledger.close()
 		return nil, refuse("SEAL_REUSED")
 	}
+	ledger.close()
 	issuer, tip, f := c.grantIssuer(ctx, r.LandlordName, r.AgentName)
 	if f != nil {
 		return nil, f

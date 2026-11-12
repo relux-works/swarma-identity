@@ -1,4 +1,4 @@
-# Trust-grant issuance: `grant draft`, `grant consent`, `grant sign`
+# Trust-grant issuance: `grant draft`, `grant consent`, `grant sign`, `grant ledger-recover`
 
 These commands issue a Grant v3 (LIP-0004) whose contract is a
 `swarma-trust-contract/1` document (LIP-0013). They follow the general CLI
@@ -146,7 +146,11 @@ every later step relative to that directory handle. The ledger itself must be
 an owner-only regular file with one link.
 
 - `grant draft`, and `grant sign` without `grant_sig`, only read the ledger
-  and never create anything. A missing ledger reads as empty.
+  and never create anything. A missing ledger reads as empty. They hold a
+  shared `flock` on the verified directory handle while they check for
+  leftover temporary files and read the ledger, so they wait for a final sign
+  in progress (at most the 15-second bound) and never read its intermediate
+  state.
 - `grant sign` with `grant_sig` holds an exclusive `flock` on the verified
   directory handle itself, from before it reads the ledger until its result
   is written. The lock belongs to the directory inode, so renaming or
@@ -178,9 +182,13 @@ an owner-only regular file with one link.
   stands, the displaced ledger is removed, the directory is synced and the
   path must still name the locked directory. Until the exchange the committed
   ledger is untouched, so a failed write (for example `ENOSPC`) or an
-  interrupted update leaves the previous ledger in force. A failed update
-  removes its temporary file. Under the lock, a file left by a crash whose
-  name matches that exact pattern is removed; no other name is touched.
+  interrupted update leaves the previous ledger in force. A writer removes
+  only its own temporary file: before the exchange and after a verified undo
+  it holds the writer's uncommitted ledger, and after a commit that stands it
+  holds the ledger the writer read, every entry of which is in the new
+  ledger. A temporary file whose undo was not verified is kept. No command
+  other than `grant ledger-recover` removes a temporary file it did not
+  create, and no name outside the exact pattern is touched.
 - A kernel, platform or file system without the atomic exchange or the
   no-replace rename refuses every final sign as `LEDGER_FILE` (fail closed);
   there is no plain-rename fallback. Linux needs `renameat2` with exchange
@@ -195,14 +203,28 @@ an owner-only regular file with one link.
   truncated file, an empty `grant_id` or any other entry outside that shape
   refuses as `LEDGER_FILE` (fail closed) at every step, never reads as a free
   seal, and nothing is recorded until the owner repairs the ledger.
+- Recovery fence. A writer stopped between its exchange and the undo (a
+  kill, or an undo defeated by a concurrent change) leaves the previous
+  ledger under the temporary name and another file under the ledger name; a
+  writer killed after a commit and before removing its temporary file, or in
+  the middle of writing it, leaves a temporary file as well. So the ledger
+  name alone is not the history while any file matching the exact temporary
+  pattern exists. Under the lock and before reading the ledger, `grant
+  draft` and both stages of `grant sign` list the directory and, if any such
+  file exists, refuse as `LEDGER_FILE` with the fixed message `A
+  seal-ledger temporary file left by an interrupted update may hold earlier
+  seals; run grant ledger-recover.` They read, write and remove nothing.
+  The fence holds until `grant ledger-recover` clears it; there is no manual
+  check to remember and no automatic deletion. A directory that cannot be
+  listed refuses as `LEDGER_FILE` (fail closed).
 - Durability. The temporary file is synced with Go's `File.Sync`, which on
   macOS uses `F_FULLFSYNC`. The directory is synced with plain `fsync`, which
   on macOS does not flush the drive's write cache. A killed process leaves the
-  previous or the new ledger, under the ledger name or, killed between the
-  exchange and its undo, the previous ledger under the temporary name; after a
-  power loss on macOS the exchange may be lost and the previous ledger come
-  back, forgetting the newest seal. Process
-  kills on Linux and passing macOS CI do not establish power-loss durability.
+  previous or the new ledger under the ledger name, and possibly a temporary
+  file, which fences the ledger until recovery; after a power loss on macOS
+  the exchange may be lost and the previous ledger come back, forgetting the
+  newest seal. Process kills on Linux and passing macOS CI do not establish
+  power-loss durability.
 
 The content is `{"schema":"swarma-identity/seal-ledger/1","seals":[{"txid","vout","grant_id"}]}`.
 A seal backs at most one grant. Draft, and sign without `grant_sig`, refuse a
@@ -218,18 +240,48 @@ make that sign refuse, but it cannot give the lock to a second writer of the
 same directory or make the sign commit a file other than its own. A file
 substituted under the writer's temporary name before the exchange is
 refused and the displaced ledger is put back, so the refusal leaves the
-committed history in place. Remaining boundary: between the exchange and its
-undo the substituted file is briefly under the ledger name, where a
-concurrent `grant draft` or a `grant sign` without `grant_sig`, which read
-without the lock, can see it; neither releases a grant, and a final sign
-waits for the lock and reads the restored ledger. An actor that changes the
-ledger or temporary name again inside that window, or a kill or power loss
-in it, can defeat the undo: the sign still refuses with no grant released,
-keeps the temporary name (which may hold the previous ledger) instead of
-removing it, and the owner must check the ledger before the next sign, whose
-stale-file cleanup removes that name. Such an actor can replace the ledger
-directly anyway. The substitution cases are exercised by an in-process step
-hook, not by a racing process at a native syscall boundary.
+committed history in place. Between the exchange and its undo the
+substituted file is briefly under the ledger name; every other command waits
+for the lock and does not see it. An actor that changes the ledger or
+temporary name again inside that window, or a kill in it, can defeat the
+undo: the sign still refuses with no grant released and keeps the temporary
+name, which may hold the previous ledger. The recovery fence then refuses
+every draft and sign until `grant ledger-recover` merges that file back.
+Such an actor can replace the ledger directly anyway. The substitution cases
+are exercised by an in-process step hook, and the interrupted state by a
+fixture built with the real exchange under the real lock, not by a racing
+process at a native syscall boundary or a killed process.
+
+## `grant ledger-recover --seal-ledger FILE --json`
+
+Clears the recovery fence. It is offline: no `--config` and no `--request`.
+Under the exclusive lock (bounded at 15 seconds like a sign) it reads the
+ledger, which must be missing or valid, and every leftover file matching the
+exact temporary pattern. Each leftover must be an owner-only regular file
+with one link, at most 64 KiB, and one of:
+
+- empty;
+- a complete ledger document with valid entries, whose entries are merged;
+- a torn write: a prefix of the ledger document a writer was writing, that
+  is the ledger or a leftover ledger extended by at most one entry. A writer
+  syncs its whole file before the exchange, so such a file was never the
+  ledger, and its extra entry backs no released grant.
+
+Anything else refuses as `LEDGER_FILE` and is kept for the owner. The merge
+is the union of the ledger's and the leftover ledgers' entries and refuses
+as `LEDGER_RECOVERY_CONFLICT` when one seal maps to two grant ids or one
+grant id to two seals. A union larger than the ledger is committed through
+the same exchange protocol as a sign (or the no-replace rename when no ledger
+exists). The ledger is then read back and must hold exactly the union; only
+then are the leftovers removed, each only while its name still denotes the
+file that was classified, and the directory is synced. A refusal before the
+read-back leaves the ledger and every leftover as they were, so the fence
+keeps holding; after the read-back the ledger already holds the union. A
+recovery interrupted after its commit is completed by running it again.
+
+The result is `{seals, restored, removed}`: the entries in the ledger after
+recovery, the entries taken from leftovers, and the leftover files removed.
+With no leftover it changes nothing and reports `restored:0, removed:0`.
 
 ## Refusals
 
@@ -246,7 +298,8 @@ All named grant refusals exit 3 with `retryable:false`:
 - the party codes: `AGENT_NOT_V3`, `AGENT_LANDLORD_MISMATCH`, `LANDLORD_NOT_V3`
 - the landlord codes: `LANDLORD_KEY_MISMATCH`, `LANDLORD_SIGNATURE`,
   `GRANT_SIGNATURE`
-- the seal codes: `SEAL_REUSED`, `LEDGER_FILE`
+- the seal codes: `SEAL_REUSED`, `LEDGER_FILE` (the recovery fence uses
+  `LEDGER_FILE` with its own fixed message), `LEDGER_RECOVERY_CONFLICT`
 - any `rental.Grant.Validate` code
 
 A draft record whose fields disagree with its contract (agent, landlord,

@@ -124,9 +124,11 @@ func TestSealLedgerWriteFailureKeepsHistory(t *testing.T) {
 // in-place rewrite interrupted after its truncate leaves, is refused as
 // LEDGER_FILE by draft and by both sign stages, for the reused seal and for a
 // fresh one, and nothing is recorded; only a missing ledger reads as new. An
-// update interrupted after writing its temporary file leaves the committed
-// ledger in force: C still refuses SEAL_REUSED, and B issues and removes the
-// stale temporary file.
+// update interrupted mid-write of its temporary file leaves the committed
+// ledger in force and fences the ledger: C and B refuse LEDGER_FILE with the
+// recovery message and the torn file is kept; grant ledger-recover removes it
+// as a torn write, restores nothing, and then C refuses SEAL_REUSED and B
+// issues.
 // Limit: the interrupted states are planted on disk, not produced by killing
 // a process mid-update.
 func TestSealLedgerInterruptedUpdate(t *testing.T) {
@@ -169,15 +171,27 @@ func TestSealLedgerInterruptedUpdate(t *testing.T) {
 	if err := os.WriteFile(stale, committed[:7], 0600); err != nil {
 		t.Fatal(err)
 	}
-	e, code = f.signCmd(c)
-	mustRefuse(t, e, code, "SEAL_REUSED")
-	e, code = f.signCmd(b) // neighbour: B issues over the stale temporary file
-	mustOK(t, e, code)
+	for _, req := range []GrantSignRequest{c, b} {
+		e, code = f.signCmd(req)
+		mustRefuse(t, e, code, "LEDGER_FILE")
+		if e.Error.Message != ledgerRecoveryMessage {
+			t.Fatalf("fence refusal without the recovery message: %q", e.Error.Message)
+		}
+	}
+	if got, err := os.ReadFile(stale); err != nil || !bytes.Equal(got, committed[:7]) || !bytes.Equal(readLedger(t, f.ledger), committed) {
+		t.Fatal("a fenced sign changed the ledger or the leftover")
+	}
+	recovered := f.recoverCmd()
+	if recovered.Restored != 0 || recovered.Removed != 1 {
+		t.Fatalf("recover of a torn write: %+v", recovered)
+	}
 	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
-		t.Fatal("stale temporary file survived a committed update")
+		t.Fatal("recover kept a torn temporary file")
 	}
 	e, code = f.signCmd(c)
 	mustRefuse(t, e, code, "SEAL_REUSED")
+	e, code = f.signCmd(b) // neighbour: B issues once the fence is cleared
+	mustOK(t, e, code)
 
 	// Neighbour: a missing ledger is a new ledger, and B issues there.
 	f.ledger = filepath.Join(canonicalTemp(t), "new-ledger.json")

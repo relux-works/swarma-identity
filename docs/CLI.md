@@ -96,7 +96,7 @@ This is the matched current UTXO total, including immature coinbase when present
 
 ## Trust-grant issuance
 
-`grant draft`, `grant consent` and `grant sign` issue a Grant v3 with a LIP-0013 `swarma-trust-contract/1` contract in two phases without any private key in the process. Their schemas, the signing flow, the seal ledger and their refusals are in [GRANT.md](GRANT.md). Named grant refusals exit 3.
+`grant draft`, `grant consent` and `grant sign` issue a Grant v3 with a LIP-0013 `swarma-trust-contract/1` contract in two phases without any private key in the process. Their schemas, the signing flow, the seal ledger and their refusals are in [GRANT.md](GRANT.md). `grant ledger-recover --seal-ledger FILE --json` (offline) merges a seal-ledger temporary file left by an interrupted update back into the ledger; until it runs, draft and sign refuse as `LEDGER_FILE`. Named grant refusals exit 3.
 
 ## Offline Nostr profiles
 

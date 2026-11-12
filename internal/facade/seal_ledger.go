@@ -47,9 +47,14 @@ type sealLedgerFile struct {
 // an update by writing its own uniquely named temporary file, syncing it and
 // atomically exchanging it with the ledger it read (see record), so a refused
 // commit can put that ledger back; it then syncs the directory and checks
-// that the path still names the locked directory. A failed, interrupted or
-// refused update therefore leaves the last committed ledger in place. A
-// missing ledger is a new, empty ledger; an existing ledger must be a
+// that the path still names the locked directory. A failed or refused update
+// therefore leaves the last committed ledger in place. A writer stopped
+// between its exchange and the undo can leave the previous ledger under its
+// temporary name, so every reader and writer, under the lock and before it
+// reads the ledger, refuses while any leftover temporary file exists (the
+// recovery fence); only grant ledger-recover clears it, by merging the
+// leftovers into the ledger before removing them. A missing ledger is a new,
+// empty ledger; an existing ledger must be a
 // complete ledger document, so an empty or truncated file is refused, and
 // every entry must be one this CLI writes: a lower-case hex txid and grant id
 // and no seal or grant id recorded twice.
@@ -150,11 +155,22 @@ const ledgerLockPoll = 10 * time.Millisecond
 // the lock or ctx is done. A failed attempt holds nothing, so giving up leaks
 // no lock.
 func lockDir(ctx context.Context, fd int) error {
+	return flockWithin(ctx, fd, unix.LOCK_EX|unix.LOCK_NB)
+}
+
+// lockDirShared takes a shared flock on the directory handle the same way. A
+// reader holds it while it checks for leftover temporary files and reads the
+// ledger, so it never sees a writer's own temporary file as a leftover.
+func lockDirShared(ctx context.Context, fd int) error {
+	return flockWithin(ctx, fd, unix.LOCK_SH|unix.LOCK_NB)
+}
+
+func flockWithin(ctx context.Context, fd, how int) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		_, err := retryEINTR(func() (int, error) { return 0, unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB) })
+		_, err := retryEINTR(func() (int, error) { return 0, unix.Flock(fd, how) })
 		if err != unix.EWOULDBLOCK {
 			return err
 		}
@@ -171,8 +187,10 @@ func lockDir(ctx context.Context, fd int) error {
 // openSealLedger opens the ledger. With create it takes the writer lock, an
 // exclusive flock on the verified directory handle bounded by ctx, and
 // creates nothing; the ledger file itself is created by the first record.
-// Without create it only reads: a missing ledger reads as empty. The caller
-// must close the ledger, which releases the lock.
+// Without create it takes a shared flock the same way and only reads: a
+// missing ledger reads as empty. Either way, before the ledger is read, the
+// recovery fence refuses while a leftover temporary file exists (see fence).
+// The caller must close the ledger, which releases the lock.
 func openSealLedger(ctx context.Context, path string, create bool) (*sealLedger, *Failure) {
 	dir, name, err := openLedgerDir(path)
 	if err != nil {
@@ -189,6 +207,13 @@ func openSealLedger(ctx context.Context, path string, create bool) (*sealLedger,
 			return nil, refuse("LEDGER_FILE")
 		}
 		l.locked = true
+	} else if lockDirShared(ctx, dir) != nil || !l.bound() {
+		l.close()
+		return nil, refuse("LEDGER_FILE")
+	}
+	if f := l.fence(); f != nil {
+		l.close()
+		return nil, f
 	}
 	if f := l.load(); f != nil {
 		l.close()
@@ -272,28 +297,63 @@ func (l *sealLedger) lookup(txid string, vout uint32) string {
 // random lower-case hex digits, so no two writers share a temporary file.
 func (l *sealLedger) tempPrefix() string { return "." + l.name + ".tmp-" }
 
-// removeStaleTemps runs only under the writer lock. Every writer creates its
-// temporary file while holding that lock and removes or commits it before
-// releasing it, so a file matching the exact temporary pattern found here was
-// left by an interrupted writer. Other names are never touched. Removal is
-// best effort: a stale file is never read.
-func (l *sealLedger) removeStaleTemps() {
+// leftovers lists the names in the locked directory that match the exact
+// temporary pattern. Every writer creates its temporary file while holding
+// the exclusive lock and removes or commits it before releasing it, so under
+// either lock, before this process creates its own, every such name was left
+// by an interrupted writer. Other names are never listed.
+func (l *sealLedger) leftovers() ([]string, error) {
 	fd, err := openAt(l.dir, ".", unix.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err != nil {
-		return
+		return nil, err
 	}
 	d := os.NewFile(uintptr(fd), ".")
-	names, _ := d.Readdirnames(-1)
+	names, err := d.Readdirnames(-1)
 	d.Close()
+	if err != nil {
+		return nil, err
+	}
 	prefix := l.tempPrefix()
+	var found []string
 	for _, n := range names {
 		if strings.HasPrefix(n, prefix) && lowerHex(n[len(prefix):], 8) {
-			unix.Unlinkat(l.dir, n, 0)
+			found = append(found, n)
 		}
 	}
+	return found, nil
 }
 
-// record commits one more entry under the held lock. The new ledger is
+// errRecoveryRequired is the fence refusal. Its code is LEDGER_FILE; its
+// fixed message names the recovery command.
+func errRecoveryRequired() *Failure {
+	return &Failure{Code: "LEDGER_FILE", Message: ledgerRecoveryMessage, Exit: 3}
+}
+
+const ledgerRecoveryMessage = "A seal-ledger temporary file left by an interrupted update may hold earlier seals; run grant ledger-recover."
+
+// fence refuses, before the ledger is read, while any leftover temporary
+// file exists: a writer stopped between its exchange and the undo leaves the
+// previous ledger under the temporary name and another file under the ledger
+// name, so the ledger name alone is not the history. Nothing is read, written
+// or removed; only grant ledger-recover clears the fence. A directory that
+// cannot be listed refuses as plain LEDGER_FILE (fail closed).
+func (l *sealLedger) fence() *Failure {
+	names, err := l.leftovers()
+	if err != nil {
+		return refuse("LEDGER_FILE")
+	}
+	if len(names) != 0 {
+		return errRecoveryRequired()
+	}
+	return nil
+}
+
+// record commits one more entry under the held lock.
+func (l *sealLedger) record(e SealEntry) *Failure {
+	return l.commit(append(append([]SealEntry{}, l.entries...), e))
+}
+
+// commit replaces the ledger with entries under the held lock. The new ledger is
 // written and synced to this writer's own temporary file, created exclusively
 // in the verified directory. It is committed by one atomic exchange of the
 // temporary name and the ledger name, so the ledger it displaces stays whole
@@ -309,16 +369,19 @@ func (l *sealLedger) removeStaleTemps() {
 // plain-rename fallback. After a commit that stands the directory is synced
 // and the path must still name the locked directory. Until the exchange the
 // committed ledger is untouched; a failure before it removes the writer's
-// temporary file and refuses.
-func (l *sealLedger) record(e SealEntry) *Failure {
+// temporary file and refuses. The only temporary file a commit removes is its
+// own: before the exchange it holds this writer's uncommitted ledger, after a
+// verified undo the same, and after a commit that stands the ledger this
+// writer read, every entry of which is in the new ledger. A temporary file
+// whose undo was not verified is kept, and the fence then holds.
+func (l *sealLedger) commit(entries []SealEntry) *Failure {
 	if !l.locked || l.dir < 0 {
 		return refuse("LEDGER_FILE")
 	}
-	raw, ok := compactJSON(sealLedgerFile{SealLedgerSchema, append(append([]SealEntry{}, l.entries...), e)})
+	raw, ok := compactJSON(sealLedgerFile{SealLedgerSchema, entries})
 	if !ok || len(raw) > sealLedgerMax {
 		return refuse("LEDGER_FILE")
 	}
-	l.removeStaleTemps()
 	var suffix [8]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
 		return refuse("LEDGER_FILE")
@@ -358,7 +421,7 @@ func (l *sealLedger) record(e SealEntry) *Failure {
 	if !l.bound() {
 		return refuse("LEDGER_FILE") // the path no longer names the locked directory
 	}
-	l.entries = append(l.entries, e)
+	l.entries = entries
 	l.held = &mine
 	return nil
 }

@@ -233,8 +233,9 @@ func TestSealLedgerForeignTempCommit(t *testing.T) {
 
 // Claim: each final sign writes its own temporary file, named
 // ".<ledger>.tmp-" plus 16 random lower-case hex digits and distinct between
-// writers, and removes it by committing it. Under the lock it removes a stale
-// file matching that exact pattern and leaves every other name untouched.
+// writers, and removes it by committing it. A leftover matching that exact
+// pattern fences the next sign (LEDGER_FILE) and is kept, and every other
+// name is left untouched and does not fence.
 // Limit: the near-miss names differ from the stale name by more than letter
 // case, because the default macOS file system is case-insensitive.
 func TestSealLedgerTempOwnership(t *testing.T) {
@@ -262,13 +263,16 @@ func TestSealLedgerTempOwnership(t *testing.T) {
 		return nil
 	})
 	for _, req := range []GrantSignRequest{a, b} {
-		if err := os.WriteFile(stale, []byte("stale"), 0600); err != nil {
-			t.Fatal(err)
-		}
 		grantIDOf(t, f.signRun(context.Background(), req))
-		if _, err := os.Lstat(stale); !os.IsNotExist(err) {
-			t.Fatal("stale temporary file survived a committed update")
-		}
+	}
+	if err := os.WriteFile(stale, []byte("stale"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.signRun(context.Background(), a); !refusedWith(got, "LEDGER_FILE") {
+		t.Fatalf("a leftover in the exact pattern did not fence: exit %d %+v", got.code, got.envelope.Error)
+	}
+	if got, err := os.ReadFile(stale); err != nil || string(got) != "stale" {
+		t.Fatal("a fenced sign removed or changed the leftover")
 	}
 	if len(seen) != 2 || seen[0] == seen[1] {
 		t.Fatalf("writers did not use their own temporary files: %v", seen)
@@ -521,6 +525,63 @@ func TestReviewPR8ForeignTempKeepsHistory(t *testing.T) {
 			reused := f.signRun(context.Background(), c)
 			if !refusedWith(reused, "SEAL_REUSED") {
 				t.Errorf("prior seal reusable after temporary substitution: exit%d error=%v", reused.code, reused.envelope.Error)
+			}
+		})
+	}
+}
+
+// Claim: restart admission must not forget previously issued A when a writer
+// stopped between exchanging a foreign temporary file and its undo. Construct
+// that documented on-disk state using the actual exchange syscall, release its
+// fixture lock, and invoke the unchanged public CLI. This is an interrupted-
+// state fixture, not a native process-kill or power-loss experiment.
+func TestReviewPR8InterruptedForeignExchange(t *testing.T) {
+	for _, interrupted := range []bool{false, true} {
+		t.Run(map[bool]string{false: "undo-completed", true: "stopped-before-undo"}[interrupted], func(t *testing.T) {
+			f := newFlow(t, "regtest", "id/landlord-a", "id/landlord-a-agent")
+			a, _, c := sealFixture(t, f)
+			idA := grantIDOf(t, f.signRun(context.Background(), a))
+			before := readLedger(t, f.ledger)
+			held, failure := openSealLedger(context.Background(), f.ledger, true)
+			if failure != nil {
+				t.Fatalf("fixture lock: %v", failure)
+			}
+			defer held.close()
+			other := "ab" + idA[2:]
+			if other == idA {
+				other = "cd" + idA[2:]
+			}
+			foreign, _ := json.Marshal(sealLedgerFile{SealLedgerSchema, []SealEntry{{sealB, 1, other}}})
+			tmp := held.tempPrefix() + "0102030405060708"
+			tmpPath := filepath.Join(filepath.Dir(f.ledger), tmp)
+			if err := os.WriteFile(tmpPath, foreign, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := exchangeAt(held.dir, tmp, held.name); err != nil {
+				t.Fatalf("fixture exchange: %v", err)
+			}
+			if !bytes.Equal(readLedger(t, tmpPath), before) {
+				t.Fatal("fixture missing intact previous ledger under temp name")
+			}
+			if !interrupted {
+				if err := exchangeAt(held.dir, tmp, held.name); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(tmpPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			held.close()
+			got := f.signRun(context.Background(), c)
+			if !refusedWith(got, "SEAL_REUSED") && !(interrupted && refusedWith(got, "LEDGER_FILE")) {
+				t.Errorf("previous seal reusable after interrupted exchange: exit%d error=%v", got.code, got.envelope.Error)
+			}
+			if interrupted {
+				ledger, _ := os.ReadFile(f.ledger)
+				saved, _ := os.ReadFile(tmpPath)
+				if !bytes.Equal(ledger, before) && !bytes.Equal(saved, before) {
+					t.Error("restart cleanup destroyed the only preserved prior ledger")
+				}
 			}
 		})
 	}
