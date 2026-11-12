@@ -149,7 +149,7 @@ func TestGrantPlantedControls(t *testing.T) {
 			"st.Size() == 0 || st.Size() > sealLedgerMax {", "st.Size() > sealLedgerMax {\n\t\treturn refuse(\"LEDGER_FILE\")\n\t}\n\tif st.Size() == 0 {\n\t\treturn nil\n\t}\n\tif false {",
 			"^TestSealLedgerInterruptedUpdate$", "want LEDGER_FILE", false},
 		{"ledger-update-in-place", "facade", "seal_ledger.go",
-			"fd, err := openAt(l.dir, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL, 0600)", "tmp = l.name\n\tfd, err := openAt(l.dir, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC, 0600)",
+			"fd, err := openAt(l.dir, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL, 0600)", "if t, err := openAt(l.dir, l.name, unix.O_WRONLY|unix.O_TRUNC, 0); err == nil {\n\t\tunix.Close(t)\n\t}\n\tfd, err := openAt(l.dir, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL, 0600)",
 			"^TestSealLedgerWriteFailureKeepsHistory$", "failed write step changed the committed ledger", false},
 		{"ledger-stale-temp-kept", "facade", "seal_ledger.go",
 			"l.removeStaleTemps()", "_ = l",

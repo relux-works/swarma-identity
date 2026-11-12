@@ -130,10 +130,10 @@ func TestSealLedgerLockSubstitution(t *testing.T) {
 		})
 		first := f.signRun(context.Background(), a)
 		ledgerHook = nil
-		idA := grantIDOf(t, first)
 		if !refusedWith(second, "LEDGER_FILE") {
 			t.Fatalf("substitute=%t: both writers ran: second exit %d %+v", substitute, second.code, second.envelope.Error)
 		}
+		idA := grantIDOf(t, first)
 		if !bytes.Contains(readLedger(t, f.ledger), []byte(idA)) {
 			t.Fatalf("substitute=%t: the first writer's seal is not recorded", substitute)
 		}
