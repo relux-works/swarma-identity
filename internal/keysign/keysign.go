@@ -1,9 +1,15 @@
 // Package keysign is the only product code that handles the grant secret. It
 // generates the secp256k1 key from the OS CSPRNG into a Keychain item, and
 // signs one digest per call after reading the secret under one fresh store
-// authentication. Every signature is checked against the stored public key
-// before it is returned, and every secret copy is zeroed. Only the
-// swarma-keychain binary links this package; swarma-identity never does.
+// authentication. Signing is implemented here (BIP-340 and RFC 6979 ECDSA
+// over btcec's scalar and point primitives) rather than through the
+// library's signers, because those keep copies of the key and nonce in
+// buffers they never clear. Every secret this package computes lives in one
+// scratch value that is wiped on every return path; docs/KEYCHAIN.md states
+// what the Go runtime still keeps outside it. Every signature is verified
+// with the library against the stored public key before it is returned.
+// Only the swarma-keychain binary links this package; swarma-identity never
+// does.
 package keysign
 
 import (
@@ -37,7 +43,8 @@ func NewWithStore(store keychain.Store, entropy io.Reader) *Signer {
 }
 
 // Keygen creates the key under a label that must not exist and returns only
-// the 33-byte compressed public key.
+// the 33-byte compressed public key. The secret is drawn into a scratch and
+// wiped on every return path.
 func (s *Signer) Keygen(label string) ([]byte, error) {
 	if !keychain.ValidLabel(label) {
 		return nil, keychain.ErrItem
@@ -55,28 +62,24 @@ func (s *Signer) Keygen(label string) ([]byte, error) {
 	case !errors.Is(err, keychain.ErrNotFound):
 		return nil, err
 	}
-	var secret [32]byte
-	defer clear(secret[:])
-	var scalar btcec.ModNScalar
-	defer scalar.Zero()
+	sc := newScratch()
+	defer sc.wipe()
 	for attempt := 0; ; attempt++ {
 		if attempt == 8 {
 			return nil, keychain.ErrStore
 		}
-		if _, err := io.ReadFull(s.entropy, secret[:]); err != nil {
+		if _, err := io.ReadFull(s.entropy, sc.secret[:]); err != nil {
 			return nil, keychain.ErrStore
 		}
-		if overflow := scalar.SetByteSlice(secret[:]); !overflow && !scalar.IsZero() {
+		if sc.loadKey() {
 			break
 		}
 	}
-	priv := btcec.PrivKeyFromScalar(&scalar)
-	compressed := priv.PubKey().SerializeCompressed()
-	priv.Zero()
-	if err := store.Create(label, &secret, compressed); err != nil {
+	compressed := sc.public()
+	if err := store.Create(label, &sc.secret, compressed); err != nil {
 		return nil, err
 	}
-	clear(secret[:])
+	sc.wipe()
 	stored, err := store.Public(label)
 	if err != nil {
 		return nil, err
@@ -106,10 +109,10 @@ func (s *Signer) Public(label string) ([]byte, error) {
 	return pub, nil
 }
 
-// withKey reads the secret once under a fresh authentication, refuses a
-// secret that is not the stored key, runs one signing step and zeroes the
-// secret and the scalar.
-func (s *Signer) withKey(label, reason string, step func(*btcec.PrivateKey, *btcec.PublicKey) ([]byte, error)) ([]byte, error) {
+// withKey reads the secret once under a fresh authentication into a new
+// scratch, refuses a secret that is not the stored key, runs one signing
+// step, and wipes the scratch on every return path.
+func (s *Signer) withKey(label, reason string, step func(*scratch, *btcec.PublicKey) ([]byte, error)) ([]byte, error) {
 	stored, err := s.Public(label)
 	if err != nil {
 		return nil, err
@@ -119,62 +122,66 @@ func (s *Signer) withKey(label, reason string, step func(*btcec.PrivateKey, *btc
 	if err != nil {
 		return nil, err
 	}
-	var secret [32]byte
-	defer clear(secret[:])
-	if err := store.Secret(label, reason, &secret); err != nil {
+	sc := newScratch()
+	defer sc.wipe()
+	if err := store.Secret(label, reason, &sc.secret); err != nil {
 		return nil, err
 	}
-	priv, derived := btcec.PrivKeyFromBytes(secret[:])
-	clear(secret[:])
-	defer priv.Zero()
-	if !derived.IsEqual(pub) {
+	ok := sc.loadKey()
+	clear(sc.secret[:])
+	if !ok || !bytes.Equal(sc.public(), stored) {
 		return nil, keychain.ErrItem
 	}
-	return step(priv, pub)
+	return step(sc, pub)
 }
 
 // SignSchnorr returns a 64-byte BIP-340 signature over a 32-byte digest, with
-// fresh auxiliary randomness, verified against the stored key.
+// fresh auxiliary randomness from the entropy source (crypto/rand in
+// production), verified with the library against the stored key.
 func (s *Signer) SignSchnorr(label, reason string, digest []byte) ([]byte, error) {
 	if len(digest) != 32 || reason == "" {
 		return nil, keychain.ErrItem
 	}
-	return s.withKey(label, reason, func(priv *btcec.PrivateKey, pub *btcec.PublicKey) ([]byte, error) {
-		var aux [32]byte
-		if _, err := io.ReadFull(s.entropy, aux[:]); err != nil {
+	return s.withKey(label, reason, func(sc *scratch, pub *btcec.PublicKey) ([]byte, error) {
+		if _, err := io.ReadFull(s.entropy, sc.aux[:]); err != nil {
 			return nil, keychain.ErrStore
 		}
-		return signSchnorrAux(priv, pub, digest, aux)
+		return signSchnorr(sc, pub, digest)
 	})
 }
 
-func signSchnorrAux(priv *btcec.PrivateKey, pub *btcec.PublicKey, digest []byte, aux [32]byte) ([]byte, error) {
-	sig, err := schnorr.Sign(priv, digest, schnorr.CustomNonce(aux))
-	if err != nil {
+// signSchnorr signs with the key loaded in sc and returns the signature only
+// if the library's BIP-340 verification accepts it for pub.
+func signSchnorr(sc *scratch, pub *btcec.PublicKey, digest []byte) ([]byte, error) {
+	sig, err := sc.schnorr(digest)
+	if err != nil || !SchnorrVerifies(sig, digest, pub) {
 		return nil, ErrSignature
 	}
-	again, err := schnorr.ParseSignature(sig.Serialize())
+	return sig, nil
+}
+
+// SchnorrVerifies is the library's BIP-340 verification of a 64-byte
+// signature over a 32-byte digest for the x-only form of pub.
+func SchnorrVerifies(sig, digest []byte, pub *btcec.PublicKey) bool {
+	parsed, err := schnorr.ParseSignature(sig)
 	xonly, perr := schnorr.ParsePubKey(schnorr.SerializePubKey(pub))
-	if err != nil || perr != nil || !again.Verify(digest, xonly) {
-		return nil, ErrSignature
-	}
-	return sig.Serialize(), nil
+	return err == nil && perr == nil && len(digest) == 32 && parsed.Verify(digest, xonly)
 }
 
 // SignECDSA returns a strict-DER, low-S ECDSA signature over a 32-byte
-// sighash (RFC 6979 nonce), verified against the stored key. The caller adds
-// the sighash type byte.
+// sighash (RFC 6979 nonce), verified with the library against the stored
+// key. The caller adds the sighash type byte.
 func (s *Signer) SignECDSA(label, reason string, hash []byte) ([]byte, error) {
 	if len(hash) != 32 || reason == "" {
 		return nil, keychain.ErrItem
 	}
-	return s.withKey(label, reason, func(priv *btcec.PrivateKey, pub *btcec.PublicKey) ([]byte, error) {
-		return signECDSA(priv, pub, hash)
+	return s.withKey(label, reason, func(sc *scratch, pub *btcec.PublicKey) ([]byte, error) {
+		return signECDSA(sc, pub, hash)
 	})
 }
 
-func signECDSA(priv *btcec.PrivateKey, pub *btcec.PublicKey, hash []byte) ([]byte, error) {
-	der := ecdsa.Sign(priv, hash).Serialize()
+func signECDSA(sc *scratch, pub *btcec.PublicKey, hash []byte) ([]byte, error) {
+	der := sc.ecdsaSign((*[32]byte)(hash))
 	if !LowSVerifies(der, hash, pub) {
 		return nil, ErrSignature
 	}

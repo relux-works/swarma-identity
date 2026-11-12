@@ -15,8 +15,9 @@ import (
 )
 
 // SealSpend is the unsigned spend of the grant's P2PKH seal outpoint: either
-// a raw unsigned transaction with one prevout (script and amount) per input,
-// or a PSBT whose every input carries its full previous transaction.
+// a raw unsigned transaction with one prevout (script and amount, optionally
+// the full previous transaction) per input, or a PSBT whose every input
+// carries its full previous transaction.
 type SealSpend struct {
 	TxHex      string    `json:"tx_hex,omitempty"`
 	PSBT       string    `json:"psbt_b64,omitempty"`
@@ -27,12 +28,17 @@ type SealSpend struct {
 type Prevout struct {
 	ScriptHex string `json:"script_hex"`
 	AmountSat int64  `json:"amount_sat"`
+	// PrevTxHex, when given, is the full previous transaction; it must hash
+	// to the input's txid and its output must carry exactly ScriptHex and
+	// AmountSat.
+	PrevTxHex string `json:"prev_tx_hex,omitempty"`
 }
 
 type plannedPrevout struct {
-	script []byte
-	amount int64
-	shown  string
+	script   []byte
+	amount   int64
+	shown    string
+	verified bool // amount and script read from a full previous tx whose txid matched
 }
 
 type sealSpendPlan struct {
@@ -84,14 +90,27 @@ func planSealSpend(s SealSpend, d GrantDraft, storedPub []byte, network string) 
 		if len(s.Prevouts) != len(p.tx.TxIn) {
 			return nil, keychainRefuse("SEAL_SPEND_PREVOUTS")
 		}
-		for _, po := range s.Prevouts {
+		verified := 0
+		for i, po := range s.Prevouts {
 			script, err := hex.DecodeString(po.ScriptHex)
 			if err != nil || hex.EncodeToString(script) != po.ScriptHex || len(script) == 0 || !amountValid(po.AmountSat) {
 				return nil, keychainRefuse("SEAL_SPEND_PREVOUTS")
 			}
-			p.prevouts = append(p.prevouts, plannedPrevout{script: script, amount: po.AmountSat})
+			planned := plannedPrevout{script: script, amount: po.AmountSat}
+			if po.PrevTxHex != "" {
+				out, ok := prevTxOutput(po.PrevTxHex, p.tx.TxIn[i].PreviousOutPoint)
+				if !ok || out.Value != po.AmountSat || !bytes.Equal(out.PkScript, script) {
+					return nil, keychainRefuse("SEAL_SPEND_PREVOUTS")
+				}
+				planned.verified = true
+				verified++
+			}
+			p.prevouts = append(p.prevouts, planned)
 		}
 		p.amountSource = "as supplied in the request (a legacy sighash does not commit to amounts; check them)"
+		if verified == len(p.prevouts) {
+			p.amountSource = "from the full previous transactions in the request (txids verified)"
+		}
 	case s.PSBT != "" && s.TxHex == "" && s.Prevouts == nil:
 		raw, err := base64.StdEncoding.Strict().DecodeString(s.PSBT)
 		if err != nil || base64.StdEncoding.EncodeToString(raw) != s.PSBT {
@@ -112,7 +131,12 @@ func planSealSpend(s SealSpend, d GrantDraft, storedPub []byte, network string) 
 			if !amountValid(out.Value) || len(out.PkScript) == 0 {
 				return nil, keychainRefuse("SEAL_SPEND_PREVOUTS")
 			}
-			p.prevouts = append(p.prevouts, plannedPrevout{script: out.PkScript, amount: out.Value})
+			// A witness UTXO is a second statement of the same prevout; it
+			// must agree with the full previous transaction.
+			if w := in.WitnessUtxo; w != nil && (w.Value != out.Value || !bytes.Equal(w.PkScript, out.PkScript)) {
+				return nil, keychainRefuse("SEAL_SPEND_PREVOUTS")
+			}
+			p.prevouts = append(p.prevouts, plannedPrevout{script: out.PkScript, amount: out.Value, verified: true})
 		}
 		p.amountSource = "from the full previous transactions in the PSBT (txids verified)"
 	default:
@@ -120,6 +144,16 @@ func planSealSpend(s SealSpend, d GrantDraft, storedPub []byte, network string) 
 	}
 	if len(p.tx.TxIn) == 0 || len(p.tx.TxOut) == 0 || int(s.InputIndex) >= len(p.tx.TxIn) || len(p.prevouts) != len(p.tx.TxIn) {
 		return nil, keychainRefuse("SEAL_SPEND_SHAPE")
+	}
+	// An outpoint can be spent once. A repeated input would count its value
+	// twice below and makes the transaction invalid, so it is refused before
+	// any amount is summed or anything is shown.
+	spent := make(map[wire.OutPoint]bool, len(p.tx.TxIn))
+	for _, in := range p.tx.TxIn {
+		if spent[in.PreviousOutPoint] {
+			return nil, keychainRefuse("SEAL_SPEND_DUPLICATE_INPUT")
+		}
+		spent[in.PreviousOutPoint] = true
 	}
 	for _, in := range p.tx.TxIn {
 		if len(in.SignatureScript) != 0 || len(in.Witness) != 0 {
@@ -156,6 +190,27 @@ func planSealSpend(s SealSpend, d GrantDraft, storedPub []byte, network string) 
 	}
 	p.sighash = hash
 	return p, nil
+}
+
+// prevTxOutput decodes a full previous transaction given as canonical hex and
+// returns the output op names, only when the transaction hashes to op's txid.
+func prevTxOutput(txHex string, op wire.OutPoint) (*wire.TxOut, bool) {
+	raw, err := hex.DecodeString(txHex)
+	if err != nil || hex.EncodeToString(raw) != txHex {
+		return nil, false
+	}
+	var prev wire.MsgTx
+	if prev.Deserialize(bytes.NewReader(raw)) != nil {
+		return nil, false
+	}
+	var again bytes.Buffer
+	if prev.Serialize(&again) != nil || !bytes.Equal(again.Bytes(), raw) {
+		return nil, false
+	}
+	if prev.TxHash() != op.Hash || int(op.Index) >= len(prev.TxOut) {
+		return nil, false
+	}
+	return prev.TxOut[op.Index], true
 }
 
 const sighashAll = byte(txscript.SigHashAll)

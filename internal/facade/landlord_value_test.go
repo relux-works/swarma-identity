@@ -175,7 +175,7 @@ func TestSealSpendSighashVectors(t *testing.T) {
 				in := wire.NewTxIn(op, nil, nil)
 				in.Sequence = 0xfffffffd - uint32(i)
 				tx.AddTxIn(in)
-				prevouts = append(prevouts, Prevout{hex.EncodeToString(script), 50000})
+				prevouts = append(prevouts, Prevout{ScriptHex: hex.EncodeToString(script), AmountSat: 50000})
 			}
 			tx.AddTxOut(wire.NewTxOut(40000, script))
 			tx.LockTime = 812345

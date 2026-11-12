@@ -122,7 +122,7 @@ func sealSpendFor(t *testing.T, d GrantDraft, script []byte) (*wire.MsgTx, SealS
 	if err := tx.SerializeNoWitness(&b); err != nil {
 		t.Fatal(err)
 	}
-	return tx, SealSpend{TxHex: hex.EncodeToString(b.Bytes()), InputIndex: 1, Prevouts: []Prevout{{hex.EncodeToString(script), 1000}, {hex.EncodeToString(script), 99000}}}
+	return tx, SealSpend{TxHex: hex.EncodeToString(b.Bytes()), InputIndex: 1, Prevouts: []Prevout{{ScriptHex: hex.EncodeToString(script), AmountSat: 1000}, {ScriptHex: hex.EncodeToString(script), AmountSat: 99000}}}
 }
 
 func landlordP2PKH(t *testing.T) []byte {

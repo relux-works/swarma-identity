@@ -285,24 +285,7 @@ func renderSignRequest(r KeychainSignRequest, tc TrustContract, key KeychainPubl
 		w("  digest           : %x\n", it.digest)
 	}
 	if spend != nil {
-		w("Seal spend         : ECDSA P2PKH, SIGHASH_ALL, input %d\n", spend.index)
-		w("  unsigned txid    : %s\n", spend.tx.TxHash())
-		w("  amounts          : %s\n", spend.amountSource)
-		for i, in := range spend.tx.TxIn {
-			mark := ""
-			if uint32(i) == spend.index {
-				mark = "  <- SIGNED BY THIS KEY"
-			}
-			w("  input %-3d        : %s:%d  %d sat  %s%s\n", i, in.PreviousOutPoint.Hash, in.PreviousOutPoint.Index, spend.prevouts[i].amount, spend.prevouts[i].shown, mark)
-		}
-		for i, out := range spend.tx.TxOut {
-			w("  output %-3d       : %d sat  %s\n", i, out.Value, spend.outputs[i])
-		}
-		w("  total in         : %d sat\n", spend.totalIn)
-		w("  total out        : %d sat\n", spend.totalOut)
-		w("  fee              : %d sat\n", spend.totalIn-spend.totalOut)
-		w("  locktime         : %d\n", spend.tx.LockTime)
-		w("  sighash          : %x\n", spend.sighash)
+		renderSealSpend(w, spend)
 	}
 	n := len(items)
 	if spend != nil {
@@ -310,6 +293,43 @@ func renderSignRequest(r KeychainSignRequest, tc TrustContract, key KeychainPubl
 	}
 	w("Each of the %d signature(s) asks for Touch ID separately.\n", n)
 	return b.String()
+}
+
+// renderSealSpend shows every field the legacy SIGHASH_ALL digest commits
+// to — transaction version, each input's outpoint and sequence, the signed
+// input's prevout script (its script code), each output's value and script,
+// the locktime and the sighash type — and, though the digest does not commit
+// to them, each prevout's amount and script, the totals and the fee.
+func renderSealSpend(w func(string, ...any), spend *sealSpendPlan) {
+	tx := spend.tx
+	w("Seal spend         : ECDSA P2PKH, input %d\n", spend.index)
+	w("  unsigned txid    : %s\n", tx.TxHash())
+	w("  version          : %d\n", tx.Version)
+	w("  amounts          : %s\n", spend.amountSource)
+	for i, in := range tx.TxIn {
+		mark := ""
+		if uint32(i) == spend.index {
+			mark = "  <- SIGNED BY THIS KEY"
+		}
+		prev := spend.prevouts[i]
+		source := "amount as supplied"
+		if prev.verified {
+			source = "amount from previous tx"
+		}
+		w("  input %-3d        : %s:%d  sequence %d (0x%08x)%s\n", i, in.PreviousOutPoint.Hash, in.PreviousOutPoint.Index, in.Sequence, in.Sequence, mark)
+		w("    prevout        : %d sat (%s)  %s\n", prev.amount, source, prev.shown)
+		w("    prevout script : %x\n", prev.script)
+	}
+	for i, out := range tx.TxOut {
+		w("  output %-3d       : %d sat  %s\n", i, out.Value, spend.outputs[i])
+		w("    script         : %x\n", out.PkScript)
+	}
+	w("  total in         : %d sat\n", spend.totalIn)
+	w("  total out        : %d sat\n", spend.totalOut)
+	w("  fee              : %d sat\n", spend.totalIn-spend.totalOut)
+	w("  locktime         : %d\n", tx.LockTime)
+	w("  sighash type     : SIGHASH_ALL (0x%02x)\n", sighashAll)
+	w("  sighash          : %x\n", spend.sighash)
 }
 
 func (deps keychainDeps) sign(label string, r KeychainSignRequest) (*KeychainSignResult, string, *Failure) {
