@@ -97,6 +97,17 @@ Source results are publicly verified before deriving parent references.
 `valid_for_seconds` is an integer 1..600. The actual local clock sets preparation
 time and expiry; separate OS CSPRNG request/sitting IDs are generated once.
 Fresh requests refuse with `REGISTRATION_POLICY_REFUSED` when the requested lifetime or the release window remaining at the captured preparation time is less than 30 seconds.
+Before creating a fresh request bundle, the exact generated request must be at
+most 2097152 bytes and its decoded unsigned PSBT at most 1048576 bytes.
+Either size refusal is `REGISTRATION_FILES` with exit 1 and no output bundle.
+These dispatch size checks do not apply to historical result verification.
+After the size checks and before output creation, one new actual clock capture
+must leave at least 30 seconds until both the original request expiry and the
+release-window end. Fractional remaining time is not rounded upward. A shorter
+margin refuses `REGISTRATION_POLICY_REFUSED` with exit 3 and no output bundle;
+IDs, preparation time, expiry and review frame are never regenerated or extended.
+In particular, an integer-second expiry made with a 30-second lifetime will
+usually have less than 30 seconds left at this later fractional instant.
 The original full request and raw binary review frame are retained.
 
 `check-result.result` and `stdout` are exact files from a normally exited call,

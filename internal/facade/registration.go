@@ -3,6 +3,7 @@ package facade
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -333,11 +334,59 @@ func (s *regSession) prepare(raw []byte) (map[string][]byte, *Failure) {
 	if e != nil {
 		return nil, regLibraryFailure(e)
 	}
+	requestRaw := request.Bytes()
+	if f := regEmissionSize(requestRaw); f != nil {
+		return nil, f
+	}
 	payload := s.basePayload()
-	payload["request.json"] = request.Bytes()
+	payload["request.json"] = requestRaw
 	payload["review-frame.bin"] = request.ReviewFrame()
-	payload["request-state.json"] = regCanonical(regRequestState{regPrefix + "request-state/1", r.Plan, r.PlanHash, r.Slot, now, requestID, sittingID, ids.ExpiresAt, regDigest(request.Bytes()), regDigest(request.ReviewFrame())})
+	payload["request-state.json"] = regCanonical(regRequestState{regPrefix + "request-state/1", r.Plan, r.PlanHash, r.Slot, now, requestID, sittingID, ids.ExpiresAt, regDigest(requestRaw), regDigest(request.ReviewFrame())})
+	if !regEmissionMargin(ids.ExpiresAt, s.profile.Policy.ReleaseNotAfter, time.Now()) {
+		return nil, regFailure("REGISTRATION_POLICY_REFUSED")
+	}
 	return payload, nil
+}
+
+// Only fresh emission uses the dispatch ceilings. Historical restoration keeps
+// its independent local limits. Inspect the exact once-generated request bytes.
+func regEmissionSize(raw []byte) *Failure {
+	if len(raw) > 2097152 {
+		return regFailure("REGISTRATION_FILES")
+	}
+	var request struct {
+		PSBT string `json:"psbt"`
+	}
+	if json.Unmarshal(raw, &request) != nil {
+		return regFailure("INTERNAL")
+	}
+	psbt, err := base64.StdEncoding.Strict().DecodeString(request.PSBT)
+	if err != nil {
+		return regFailure("INTERNAL")
+	}
+	if len(psbt) > 1048576 {
+		return regFailure("REGISTRATION_FILES")
+	}
+	return nil
+}
+
+// Compare the frozen request endpoint first, then release, at one actual final
+// instant. Ordering precedes unsigned subtraction; fractional time is not rounded.
+func regEmissionMargin(expiresAt, releaseNotAfter uint64, now time.Time) bool {
+	seconds := now.Unix()
+	if seconds < 0 {
+		return false
+	}
+	for _, end := range []uint64{expiresAt, releaseNotAfter} {
+		if !regTime(end) || end <= uint64(seconds) {
+			return false
+		}
+		remaining := end - uint64(seconds)
+		if remaining < 30 || (remaining == 30 && now.Nanosecond() != 0) {
+			return false
+		}
+	}
+	return true
 }
 func (s *regSession) checkResult(raw []byte) (map[string][]byte, *Failure) {
 	var r regCheck
