@@ -38,7 +38,7 @@ func regTestFrozenParents(t *testing.T) (*regTestEnv, string, []regParent, regRe
 				psbt = tx.PSBT
 			}
 		}
-		r, err := s.planner.PrepareRequest(plan, slot, psbt, reg.RequestIDs{v.RequestID, v.SittingID, v.ExpiresAt}, when)
+		r, err := s.planner.PrepareRequest(plan, slot, psbt, reg.RequestIDs{RequestID: v.RequestID, SittingID: v.SittingID, ExpiresAt: v.ExpiresAt}, when)
 		if err != nil {
 			t.Fatal(err)
 		}
