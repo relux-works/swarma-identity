@@ -2,7 +2,10 @@ package facade
 
 import (
 	"bufio"
+	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -184,18 +187,34 @@ type KeychainSignResult struct {
 	SealSpend  *SealSpendSignature `json:"seal_spend,omitempty"`
 }
 
-// signItem is one approved signature: what is shown, what is signed.
+// grantDomain is the signing-domain prefix rental.Grant.SigningHash puts in
+// front of the canonical grant: a fixed ASCII string, no terminator.
+const grantDomain = "swarma-grant-v3"
+
+// signItem is one approved signature. digest is the SHA-256 of prefix || body,
+// computed here from exactly those bytes; fields lists every value body
+// commits to, decoded from body. The display shows fields and the bytes, so
+// what is approved is what is hashed and signed.
 type signItem struct {
-	purpose string
-	digest  []byte
+	purpose   string
+	digest    []byte
+	prefix    string
+	body      []byte
+	fields    []string
+	consentAt int64 // grant only: the consent created_at decoded from body
 }
+
+func (it signItem) preimage() []byte { return append([]byte(it.prefix), it.body...) }
 
 func keychainRefuse(code string) *Failure {
 	return &Failure{Code: code, Message: "The signing request is refused before any key is read.", Exit: 3}
 }
 
-// bindDigests checks each requested digest against the draft. A digest that
-// is not re-derived from the shown fields is refused.
+// bindDigests checks each requested digest against the draft. Each digest is
+// recomputed as SHA-256 over the exact bytes the display will show: the
+// contract bytes for contract_sha256, and grantDomain || rental's canonical
+// grant (the actual consent event and landlord_sig inside it) for
+// grant_signing_hash. A digest that does not match is refused.
 func bindDigests(r KeychainSignRequest, raw []byte, xonly string) ([]signItem, *Failure) {
 	d := r.Draft
 	if d.IssuerKey != xonly {
@@ -208,10 +227,10 @@ func bindDigests(r KeychainSignRequest, raw []byte, xonly string) ([]signItem, *
 			return nil, keychainRefuse("DIGEST_BINDING")
 		}
 		seen[s.Purpose] = true
-		var want string
+		it := signItem{purpose: s.Purpose}
 		switch s.Purpose {
 		case PurposeContract:
-			want = d.ContractSHA256
+			it.body = raw
 		case PurposeGrant:
 			if r.ConsentEvent == nil || r.LandlordSig == "" {
 				return nil, keychainRefuse("DIGEST_BINDING")
@@ -226,19 +245,34 @@ func bindDigests(r KeychainSignRequest, raw []byte, xonly string) ([]signItem, *
 			if f != nil {
 				return nil, f
 			}
-			hash, err := g.SigningHash()
+			body, err := g.Canonical()
 			if err != nil {
 				return nil, rentalRefusal(err)
 			}
-			want = hash
+			var signed rental.Grant
+			if json.Unmarshal(body, &signed) != nil {
+				return nil, keychainRefuse("DIGEST_BINDING")
+			}
+			it.prefix, it.body, it.consentAt = grantDomain, body, signed.Consent.ConsentEvent.CreatedAt
+			// rental's own hash must be the hash of the shown bytes: a
+			// changed signing construction fails closed instead of signing
+			// bytes the display does not describe.
+			if hash, err := g.SigningHash(); err != nil || hash != sha256Hex(it.preimage()) {
+				return nil, keychainRefuse("DIGEST_BINDING")
+			}
 		default:
 			return nil, keychainRefuse("DIGEST_BINDING")
 		}
-		if s.Digest != want {
+		sum := sha256.Sum256(it.preimage())
+		if s.Digest != hex.EncodeToString(sum[:]) {
 			return nil, keychainRefuse("DIGEST_BINDING")
 		}
-		b, _ := hex.DecodeString(s.Digest)
-		items = append(items, signItem{s.Purpose, b})
+		fields, ok := jsonLeaves(it.body)
+		if !ok {
+			return nil, keychainRefuse("DIGEST_BINDING")
+		}
+		it.digest, it.fields = sum[:], fields
+		items = append(items, it)
 	}
 	if r.ToSign == nil || (len(items) == 0 && r.SealSpend == nil) {
 		return nil, fail("BAD_INPUT")
@@ -254,6 +288,103 @@ func printable(s string) string {
 }
 
 func utc(sec int64) string { return time.Unix(sec, 0).UTC().Format(time.RFC3339) }
+
+// jsonLeaves lists every value of one JSON document as "path = value", in
+// document order: object members as a.b, array elements as a[0]. Strings are
+// quoted with control and non-ASCII characters escaped, numbers keep their
+// exact spelling, and an empty object or array is a value of its own, so no
+// committed value is left out. Anything but exactly one document is refused.
+func jsonLeaves(doc []byte) ([]string, bool) {
+	d := json.NewDecoder(bytes.NewReader(doc))
+	d.UseNumber()
+	var out []string
+	var walk func(path string) bool
+	walk = func(path string) bool {
+		tok, err := d.Token()
+		if err != nil {
+			return false
+		}
+		switch v := tok.(type) {
+		case json.Delim:
+			n := 0
+			for ; d.More(); n++ {
+				p := fmt.Sprintf("%s[%d]", path, n)
+				if v == '{' {
+					k, err := d.Token()
+					key, ok := k.(string)
+					if err != nil || !ok {
+						return false
+					}
+					if p = printable(key); path != "" {
+						p = path + "." + p
+					}
+				}
+				if !walk(p) {
+					return false
+				}
+			}
+			if n == 0 {
+				out = append(out, path+" = "+map[json.Delim]string{'{': "{}", '[': "[]"}[v])
+			}
+			_, err := d.Token()
+			return err == nil
+		case string:
+			out = append(out, path+" = "+strconv.QuoteToASCII(v))
+		case json.Number:
+			out = append(out, path+" = "+v.String())
+		case bool:
+			out = append(out, path+" = "+strconv.FormatBool(v))
+		case nil:
+			out = append(out, path+" = null")
+		}
+		return true
+	}
+	if !walk("") {
+		return nil, false
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return nil, false
+	}
+	return out, true
+}
+
+// renderPreimage shows the exact bytes a BIP-340 digest is the SHA-256 of:
+// first every value they commit to, decoded from those bytes, then the bytes
+// themselves, 64 per line after their offset. A byte outside printable ASCII
+// is shown as \xNN; canonical JSON never has a backslash before x, so the
+// form is unambiguous.
+func renderPreimage(w func(string, ...any), it signItem, d GrantDraft) {
+	pre := it.preimage()
+	if it.prefix == "" {
+		w("  SHA-256 of       : the %d contract bytes below (no domain prefix)\n", len(pre))
+	} else {
+		w("  SHA-256 of       : the %d bytes below: domain prefix \"%s\" (%d bytes, no terminator) || canonical grant (%d bytes)\n", len(pre), printable(it.prefix), len(it.prefix), len(it.body))
+	}
+	w("  committed fields :\n")
+	for _, f := range it.fields {
+		w("    %s\n", f)
+	}
+	if it.purpose == PurposeGrant {
+		t := d.ConsentTemplate.CreatedAt
+		if it.consentAt == t {
+			w("  consent time     : %d (%s) equals the draft template\n", it.consentAt, utc(it.consentAt))
+		} else {
+			w("  consent time     : %d (%s) DIFFERS from the draft template %d (%s): the grantee's signer chose its own time\n", it.consentAt, utc(it.consentAt), t, utc(t))
+		}
+	}
+	w("  exact bytes      :\n")
+	for off := 0; off < len(pre); off += 64 {
+		var line strings.Builder
+		for _, c := range pre[off:min(off+64, len(pre))] {
+			if c >= 0x20 && c < 0x7f {
+				line.WriteByte(c)
+			} else {
+				fmt.Fprintf(&line, "\\x%02x", c)
+			}
+		}
+		w("    %04d  %s\n", off, line.String())
+	}
+}
 
 // renderSignRequest is every field the human approves. The confirmation
 // covers exactly this text.
@@ -283,6 +414,7 @@ func renderSignRequest(r KeychainSignRequest, tc TrustContract, key KeychainPubl
 	for i, it := range items {
 		w("Signature %d        : BIP-340, purpose %s\n", i+1, it.purpose)
 		w("  digest           : %x\n", it.digest)
+		renderPreimage(w, it, d)
 	}
 	if spend != nil {
 		renderSealSpend(w, spend)
