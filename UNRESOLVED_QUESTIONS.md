@@ -15,8 +15,8 @@
 
   Choosing one is a decision for Ivan and the leads.
 - G1-K `keychain sign` takes a digest only together with the draft it binds to, so the landlord signs twice per grant (`contract_sha256`, then `grant_signing_hash`). Each signature asks for Touch ID separately.
-- G1-K signer memory hardening (tracked, not scheduled). The arithmetic temporaries inside the pinned curve library (secp256k1 v4.4.0 `DoubleNonConst`, `AddNonConst`, `ToAffine`, `FieldVal.Inverse` and `ModNScalar` locals) are not cleared. `docs/KEYCHAIN.md` "Residual memory" accepts them for the one-shot `swarma-keychain` process only. The options for closing it are:
-  1. Sign through libsecp256k1 via cgo, which clears its own secret intermediates with `secp256k1_memclear`. This adds a C dependency and its build and review.
-  2. Sign in the keyvault once it is qualified, so the key never enters this process.
+- G1-K signer memory hardening (planned migration to libsecp256k1, owner decision 2026-11-13, not scheduled yet). The arithmetic temporaries inside the pinned curve library (secp256k1 v4.4.0 `DoubleNonConst`, `AddNonConst`, `ToAffine`, `FieldVal.Inverse` and `ModNScalar` locals) are not cleared, and Go gives no guarantee of erasing any value, so the clearing of the tool's own buffers is best effort. `docs/KEYCHAIN.md` "Residual memory" accepts this for the one-shot `swarma-keychain` process only. Ivan decided to keep the current signer for now; the demo scale does not need more. The path is:
+  1. Planned migration: sign through libsecp256k1 via cgo (`secp256k1_schnorrsig_sign32`, `secp256k1_ecdsa_sign`), which clears its own secret intermediates with `secp256k1_memclear`. This adds a C dependency and its build and review. It is not scheduled yet.
+  2. Later custody: sign in the keyvault once it is qualified (KEY-MAP K5), so the key never enters this process.
 
-  It becomes required before `internal/keysign` is used in any long-running process. Choosing between the options is a decision for the leads.
+  The migration becomes required before `internal/keysign` is used in any long-running process.

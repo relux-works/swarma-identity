@@ -52,7 +52,9 @@ The values this tool owns, and where each is cleared:
 
 ### Residual memory
 
-Temporaries inside the pinned curve library are **not** cleared, by decision. Clearing them would mean forking or reimplementing the field and group arithmetic, which this PR does not do. They are listed here precisely, with the reasoning that makes them an accepted limit, and a hardening option is tracked in `UNRESOLVED_QUESTIONS.md`.
+Temporaries inside the pinned curve library are **not** cleared, by decision. Clearing them would mean forking or reimplementing the field and group arithmetic, which this PR does not do. They are listed here precisely, with the reasoning that makes them an accepted limit, and the planned migration that closes them is recorded in `UNRESOLVED_QUESTIONS.md`.
+
+Go gives no guarantee that any value is erased, and that includes the buffers this tool owns. The compiler may keep copies of a value in registers and spill them to stack slots, and the runtime copies a goroutine's stack when it grows. Source code can neither name nor clear those copies. Every clearing described in this document is therefore best effort: it overwrites the copies the code can reach, and it cannot prove that no other copy exists.
 
 The library is `github.com/decred/dcrd/dcrec/secp256k1/v4` v4.4.0, reached through `btcec/v2` v2.3.5. The functions below receive secret-derived inputs from this package. They hold intermediates in multiword `FieldVal` (10×uint32) locals in their own frames and in registers, and never zero them:
 
@@ -83,9 +85,9 @@ Why this is accepted:
    Between the last signature and the exit, the only work is verifying, hex-encoding and writing public data. No reference to a scratch remains after `withKey` returns. The process's memory then goes back to the kernel, which zero-fills pages before handing them to any process.
 2. **Clearing them would not change the threat model.** While a signature is being made, the decrypted key is in this process's memory: the key bytes until `loadKey` returns, and the scalar d in the scratch for the whole operation. An attacker who can read this process's memory during signing can therefore read the key itself at that moment, so clearing library stack temporaries would not deny them anything. An attacker who cannot read the process's memory gets nothing from the temporaries either, and after the exit they no longer exist.
 
-This argument depends on the process being one-shot. Any later use of `internal/keysign` in a long-running process (a daemon, an agent, a library linked into a server) invalidates it, and that use must first adopt the hardening option.
+This argument depends on the process being one-shot. Any later use of `internal/keysign` in a long-running process (a daemon, an agent, a library linked into a server) invalidates it, and that use must first complete the planned migration below.
 
-**Tracked hardening option (not done here).** Sign through libsecp256k1 via cgo: `secp256k1_schnorrsig_sign32` and `secp256k1_ecdsa_sign` clear their own secret intermediates with `secp256k1_memclear`. Alternatively, move signing into the keyvault once it is qualified, so the key never enters this process. See `UNRESOLVED_QUESTIONS.md`.
+**Planned migration (owner decision, 2026-11-13).** Ivan decided to keep the current signer for now. Go gives no guarantee of erasing memory, so signing is planned to move to libsecp256k1 via cgo: `secp256k1_schnorrsig_sign32` and `secp256k1_ecdsa_sign`, which clear their own secret intermediates with `secp256k1_memclear`. The migration is not scheduled yet; the demo scale does not need it. It is recorded here and in `UNRESOLVED_QUESTIONS.md` so that it stays in view. The keyvault, once it is qualified, remains the later custody target (KEY-MAP K5): the key would then never enter this process.
 
 Other limits:
 - **Timing.** Like the btcec routines it replaces (`…NonConst`), the multiplication by G branches on the scalar's bits. The threat model above does not include a local timing attacker.
