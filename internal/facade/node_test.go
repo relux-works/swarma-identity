@@ -100,6 +100,12 @@ func nodeFixture(t *testing.T, mode string, cancel context.CancelFunc) (*Client,
 			}
 			if mode == "uncertain" {
 				cancel()
+				// Wait for the client to cancel before the server can send an empty 200.
+				<-r.Context().Done()
+				return
+			}
+			if mode == "empty-response" {
+				w.WriteHeader(http.StatusOK)
 				return
 			}
 			var action string
@@ -300,7 +306,29 @@ func TestNameExpiryFixtures(t *testing.T) {
 // Every failure family emits no partial result and sends no retry/import/abort.
 // Pruned=true exercises no historical-block dependency; it is a fixture only.
 func TestUTXOScanContract(t *testing.T) {
-	for _, tc := range []struct{ mode, code string }{{"", ""}, {"zero", ""}, {"coinbase", ""}, {"busy", "SCAN_BUSY"}, {"uncertain", "SCAN_UNCERTAIN"}, {"outside", "PROVIDER_PROTOCOL"}, {"duplicate", "PROVIDER_PROTOCOL"}, {"negative", "PROVIDER_PROTOCOL"}, {"wrong-total", "PROVIDER_PROTOCOL"}, {"incomplete", "PROVIDER_PROTOCOL"}, {"tip", "SNAPSHOT_CHANGED"}, {"ibd", "NODE_UNSYNCED"}, {"name-script", "PROVIDER_PROTOCOL"}, {"missing-coinbase", "PROVIDER_PROTOCOL"}, {"fractional-index", "PROVIDER_PROTOCOL"}, {"future-output", "PROVIDER_PROTOCOL"}, {"null-unspents", "PROVIDER_PROTOCOL"}, {"missing-total", "PROVIDER_PROTOCOL"}, {"scan-tip", "SNAPSHOT_CHANGED"}} {
+	for _, tc := range []struct{ mode, code string }{
+		{"", ""},
+		{"zero", ""},
+		{"coinbase", ""},
+		{"busy", "SCAN_BUSY"},
+		{"uncertain", "SCAN_UNCERTAIN"},
+		// An empty HTTP 200 without cancellation remains a provider protocol failure.
+		{"empty-response", "PROVIDER_PROTOCOL"},
+		{"outside", "PROVIDER_PROTOCOL"},
+		{"duplicate", "PROVIDER_PROTOCOL"},
+		{"negative", "PROVIDER_PROTOCOL"},
+		{"wrong-total", "PROVIDER_PROTOCOL"},
+		{"incomplete", "PROVIDER_PROTOCOL"},
+		{"tip", "SNAPSHOT_CHANGED"},
+		{"ibd", "NODE_UNSYNCED"},
+		{"name-script", "PROVIDER_PROTOCOL"},
+		{"missing-coinbase", "PROVIDER_PROTOCOL"},
+		{"fractional-index", "PROVIDER_PROTOCOL"},
+		{"future-output", "PROVIDER_PROTOCOL"},
+		{"null-unspents", "PROVIDER_PROTOCOL"},
+		{"missing-total", "PROVIDER_PROTOCOL"},
+		{"scan-tip", "SNAPSHOT_CHANGED"},
+	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
