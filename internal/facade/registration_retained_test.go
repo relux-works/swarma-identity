@@ -130,6 +130,23 @@ func TestRegistrationRetainedSubstitution(t *testing.T) {
 			regTestEditState(t, filepath.Join(filepath.Dir(p.Bundle), "request-state.json"), func(s *regRequestState) { s.RequestID = strings.Repeat("cd", 32) })
 			p.BundleHash = regTestReseal(t, p.Bundle)
 		}},
+		{"account-pin", "REGISTRATION_PARENT_REFUSED", func(t *testing.T, r string, p *regParent) {
+			path := filepath.Join(filepath.Dir(p.Bundle), "account-pin.json")
+			raw := regTestRead(t, path)
+			changed := bytes.Replace(raw, []byte(`"group":"fixture/recovery@1"`), []byte(`"group":"other/recovery@1"`), 1)
+			if bytes.Equal(raw, changed) {
+				t.Fatal("pin substitution not applied")
+			}
+			regTestWrite(t, path, changed)
+			p.BundleHash = regTestReseal(t, p.Bundle)
+		}},
+		{"pin-bytes", "REGISTRATION_PARENT_REFUSED", func(t *testing.T, r string, p *regParent) {
+			// Whitespace preserves valid pin semantics, but not the independently
+			// selected exact snapshot. Reseal payload commitments to reach binding.
+			path := filepath.Join(filepath.Dir(p.Bundle), "account-pin.json")
+			regTestWrite(t, path, append(regTestRead(t, path), ' '))
+			p.BundleHash = regTestReseal(t, p.Bundle)
+		}},
 		{"expiry", "REGISTRATION_PARENT_REFUSED", func(t *testing.T, r string, p *regParent) {
 			regTestEditState(t, filepath.Join(filepath.Dir(p.Bundle), "request-state.json"), func(s *regRequestState) { s.ExpiresAt++ })
 			p.BundleHash = regTestReseal(t, p.Bundle)

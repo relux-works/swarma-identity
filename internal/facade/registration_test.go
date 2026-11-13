@@ -50,9 +50,17 @@ func regTestJSON(t *testing.T, v any) []byte {
 	}
 	return b
 }
+func regTestDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
 func newRegTestEnv(t *testing.T, mode string, live bool) *regTestEnv {
 	t.Helper()
-	dir := t.TempDir()
+	dir := regTestDir(t)
 	pin := regTestRead(t, "../registration/testdata/core28/account-pin.json")
 	var m struct {
 		Network string     `json:"network"`

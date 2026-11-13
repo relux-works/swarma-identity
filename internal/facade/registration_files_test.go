@@ -20,7 +20,7 @@ import (
 func TestRegistrationInputFiles(t *testing.T) {
 	for _, variant := range []string{"mode", "symlink", "hardlink", "ancestor", "directory", "replaced", "modified", "expectation", "role"} {
 		t.Run(variant, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := regTestDir(t)
 			path := filepath.Join(dir, "input")
 			raw := []byte("safe")
 			regTestWrite(t, path, raw)
@@ -83,7 +83,7 @@ func TestRegistrationInputFiles(t *testing.T) {
 // these are transport predicates, not claims of semantic PSBT/funding maxima.
 func TestRegistrationFileCaps(t *testing.T) {
 	caps := []int{256, 16384, 65536, 1 << 20, 2 << 20, 4 << 20, 6 << 20, 8 << 20}
-	dir := t.TempDir()
+	dir := regTestDir(t)
 	for _, cap := range caps {
 		for _, size := range []int{cap - 1, cap, cap + 1} {
 			t.Run(fmt.Sprintf("%d-%d", cap, size), func(t *testing.T) {
@@ -108,7 +108,7 @@ func TestRegistrationFileCaps(t *testing.T) {
 // Shared exact paths count once; differing expectations are forbidden above.
 func TestRegistrationAggregateBudgets(t *testing.T) {
 	t.Run("files", func(t *testing.T) {
-		dir := t.TempDir()
+		dir := regTestDir(t)
 		z := newRegFreezer()
 		for i := 0; i < 129; i++ {
 			path := filepath.Join(dir, fmt.Sprint(i))
@@ -127,7 +127,7 @@ func TestRegistrationAggregateBudgets(t *testing.T) {
 		}
 	})
 	t.Run("bytes", func(t *testing.T) {
-		dir := t.TempDir()
+		dir := regTestDir(t)
 		z := newRegFreezer()
 		raw := bytes.Repeat([]byte("x"), 8<<20)
 		for i := 0; i < 16; i++ {
@@ -164,7 +164,7 @@ func (c *regInterruptContext) Err() error {
 func TestRegistrationInterruptedCommit(t *testing.T) {
 	for _, at := range []int{3, 4} {
 		t.Run(fmt.Sprint(at), func(t *testing.T) {
-			dir := t.TempDir()
+			dir := regTestDir(t)
 			path := filepath.Join(dir, "bundle")
 			payload := map[string][]byte{"account-pin.json": []byte("public")}
 			ctx := &regInterruptContext{Context: context.Background(), at: at}
@@ -257,7 +257,7 @@ func TestRegistrationOwnerPredicate(t *testing.T) {
 // Concurrent create-only attempts have exactly one complete winner. The loser
 // cannot mix payload/index bytes or overwrite the winning private directory.
 func TestRegistrationConcurrentCreate(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "bundle")
+	path := filepath.Join(regTestDir(t), "bundle")
 	type verdict struct {
 		success *regSuccess
 		failure *Failure

@@ -311,6 +311,9 @@ func (s *regSession) prepare(raw []byte) (map[string][]byte, *Failure) {
 	if f != nil {
 		return nil, f
 	}
+	if !regDispatchMargin(r.ValidFor, s.profile.Policy.ReleaseNotAfter-now) {
+		return nil, regFailure("REGISTRATION_POLICY_REFUSED")
+	}
 	requestID, f := regRandom(32)
 	if f != nil {
 		return nil, f
@@ -352,4 +355,9 @@ func (s *regSession) checkResult(raw []byte) (map[string][]byte, *Failure) {
 	payload["verified-transaction.hex"] = []byte(tx.Hex)
 	payload["public-result.json"] = regCanonical(regPublicResult{regPrefix + "public-result/1", tx.TxID, tx.SignedPSBTSHA256, verified.ResultSHA256, strconv.FormatUint(tx.FeeAtoms, 10), tx.Weight, tx.VSize, verified.ReportedJournalSequence, verified.ReportedJournalHeadSHA256})
 	return payload, nil
+}
+
+// Both margins use the same actual clock captured by prepare after admission.
+func regDispatchMargin(validFor, releaseRemaining uint64) bool {
+	return validFor >= 30 && releaseRemaining >= 30
 }

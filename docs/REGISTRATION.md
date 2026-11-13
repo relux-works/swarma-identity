@@ -96,6 +96,7 @@ Source results are publicly verified before deriving parent references.
 `request.slot` is A/B for a reservation, C/D for a reveal.
 `valid_for_seconds` is an integer 1..600. The actual local clock sets preparation
 time and expiry; separate OS CSPRNG request/sitting IDs are generated once.
+Fresh requests refuse with `REGISTRATION_POLICY_REFUSED` when the requested lifetime or the release window remaining at the captured preparation time is less than 30 seconds.
 The original full request and raw binary review frame are retained.
 
 `check-result.result` and `stdout` are exact files from a normally exited call,
