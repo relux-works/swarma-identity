@@ -296,6 +296,18 @@ func (s *regSession) reveal(raw []byte) (map[string][]byte, *Failure) {
 	return payload, nil
 }
 func (s *regSession) prepare(raw []byte) (map[string][]byte, *Failure) {
+	return s.prepareWith(raw, regPrepareOps{s.planner.PrepareRequest, regEmissionSize, time.Now})
+}
+
+// Keep production dependencies fixed at the entry point. Internal tests can
+// account for time consumed by real construction and size validation separately.
+type regPrepareOps struct {
+	build func(*reg.Plan, string, string, reg.RequestIDs, uint64) (*reg.SigningRequest, error)
+	size  func([]byte) *Failure
+	now   func() time.Time
+}
+
+func (s *regSession) prepareWith(raw []byte, ops regPrepareOps) (map[string][]byte, *Failure) {
 	var r regRequest
 	if !regDecode(raw, &r) || r.Schema != regPrefix+"request/1" || !regSlot(r.Slot) || r.ValidFor < 1 || r.ValidFor > 600 {
 		return nil, regFailure("BAD_INPUT")
@@ -330,19 +342,19 @@ func (s *regSession) prepare(raw []byte) (map[string][]byte, *Failure) {
 			unsigned = tx.PSBT
 		}
 	}
-	request, e := s.planner.PrepareRequest(plan, r.Slot, unsigned, ids, now)
+	request, e := ops.build(plan, r.Slot, unsigned, ids, now)
 	if e != nil {
 		return nil, regLibraryFailure(e)
 	}
 	requestRaw := request.Bytes()
-	if f := regEmissionSize(requestRaw); f != nil {
+	if f := ops.size(requestRaw); f != nil {
 		return nil, f
 	}
 	payload := s.basePayload()
 	payload["request.json"] = requestRaw
 	payload["review-frame.bin"] = request.ReviewFrame()
 	payload["request-state.json"] = regCanonical(regRequestState{regPrefix + "request-state/1", r.Plan, r.PlanHash, r.Slot, now, requestID, sittingID, ids.ExpiresAt, regDigest(requestRaw), regDigest(request.ReviewFrame())})
-	if !regEmissionMargin(ids.ExpiresAt, s.profile.Policy.ReleaseNotAfter, time.Now()) {
+	if !regEmissionMargin(ids.ExpiresAt, s.profile.Policy.ReleaseNotAfter, ops.now()) {
 		return nil, regFailure("REGISTRATION_POLICY_REFUSED")
 	}
 	return payload, nil
