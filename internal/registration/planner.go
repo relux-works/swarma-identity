@@ -83,9 +83,16 @@ func (p *Planner) Reserve(in ReservationInput, now uint64) (*Plan, error) {
 	if !p.timeOK(now) {
 		return nil, ErrPolicy
 	}
+	return p.reserve(in)
+}
+
+func (p *Planner) reserve(in ReservationInput) (*Plan, error) {
 	regs := in.Registrations
 	if !validName(regs[0].Name, "id/") || !validName(regs[1].Name, "d/") || regs[0].Name[3:] != regs[1].Name[2:] || len(regs[0].FixedValue) != 0 || !valueBytes(regs[1].FixedValue) {
 		return nil, ErrInput
+	}
+	if _, e := ParseValue(regs[1].FixedValue); e != nil {
+		return nil, ErrValue
 	}
 	for _, r := range regs {
 		if !hexSize(r.RandHex, 20) {
@@ -151,6 +158,10 @@ func (p *Planner) Reveal(reservation *Plan, in RevealInput, now uint64) (*Plan, 
 	if !p.timeOK(now) {
 		return nil, ErrPolicy
 	}
+	return p.reveal(reservation, in)
+}
+
+func (p *Planner) reveal(reservation *Plan, in RevealInput) (*Plan, error) {
 	if reservation == nil || reservation.reservation == nil {
 		return nil, ErrParents
 	}

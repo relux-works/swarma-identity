@@ -57,7 +57,7 @@ Scratch output goes to `.temp/`, which Git ignores.
 | --- | --- | --- |
 | Go 1.26.8 | Build: command above. Test: `GOTOOLCHAIN=local GOMAXPROCS=2 go test -p 1 -parallel 1 ./...`. Static checks: `GOTOOLCHAIN=local GOMAXPROCS=2 go vet -p 1 ./...`. | Binary under `.temp/bin/`; redirect logs to `.temp/`. |
 | gofmt | Format: `gofmt -w cmd internal`. | Updates those source files. |
-| swarma-identity | The commands above; every invocation requires `--json`. | One JSON envelope on stdout; fixed bounded diagnostics on stderr. |
+| swarma-identity | The commands above and the offline `registration` commands below; every invocation requires `--json`. | One JSON envelope on stdout; fixed bounded diagnostics on stderr. |
 | swarma-keychain | darwin/cgo only: `keychain keygen`, `keychain sign`, `value build` ([docs/KEYCHAIN.md](docs/KEYCHAIN.md)). | One JSON envelope on stdout. The signing display and the confirmation use `/dev/tty`. |
 | Keychain tests (macOS) | `security create-keychain -p PW "$RUNNER_TEMP/swarma-test-X.keychain-db"`, unlock it, then `SWARMA_KEYCHAIN_TEST_PATH=<that path> go test -tags keychaintest -run 'TestTestKeychain\|TestKeychainDarwin' ./internal/keychain/ ./internal/facade/`. The `keychaintest` tag is for tests only and never goes into release builds. | Throwaway test keychain only; never the login keychain. |
 
@@ -73,7 +73,18 @@ Use a standalone Go distribution for the full suite. The Nostr observer uses sta
 
 The offline Go planner in `internal/registration` constructs PSBTv0 reservation and reveal phases from a fixed public funding transaction, an independently selected account pin and immutable policy. It preserves exact approved value bytes and extracts the social and grant keys through the reveal-building path. Its public Core 28.0 fixtures cover both release modes. Plan construction establishes no chain state, signing, protected receipt provenance or broadcast permission. See [fixture details](internal/registration/testdata/core28/README.md).
 
-The same internal library prepares immutable signing requests and review frames, checks preserved PSBT maps and every public BIP143 signature, and assembles final witnesses. Result checks bind receipts to the request and require a zero exit plus the exact acknowledgement hashing the complete original result file. Reported journal fields remain unauthenticated public metadata; these checks grant no custody, owner-presence or release authority. Namecoin transaction commands and protected signer integration are not yet exposed by the CLI.
+The same internal library prepares immutable signing requests and review frames, checks preserved PSBT maps and every public BIP143 signature, and assembles final witnesses. Result checks bind receipts to the request and require a zero exit plus the exact acknowledgement hashing the complete original result file. Reported journal fields remain unauthenticated public metadata; these checks grant no custody, owner-presence or release authority. The CLI exposes the unsigned file interface below; protected signer integration remains separate.
+
+## Offline registration bundles
+
+`registration account-pin`, `registration reserve`, `registration reveal`,
+`registration request` and `registration check-result` build unsigned local
+bundles or verify public completed results. They use explicit independently
+pinned profile/account files and create a new private output directory.
+They invoke no vault, signer, node or network. Exact argv, schemas, limits,
+retained-context rules and refusal codes are in [the registration file
+contract](docs/REGISTRATION.md). Use the existing Go build/test commands above;
+keep local inputs, bundles and test captures under `.temp/`.
 
 ## License
 

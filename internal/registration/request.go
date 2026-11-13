@@ -61,6 +61,11 @@ func (p *Planner) PrepareRequest(plan *Plan, slot, unsigned string, ids RequestI
 	if !hexSize(ids.RequestID, 32) || !hexSize(ids.SittingID, 32) || !p.timeOK(now) || ids.ExpiresAt <= now || ids.ExpiresAt-now > 600 {
 		return nil, ErrInput
 	}
+	return p.buildSigningRequest(plan, slot, unsigned, ids)
+}
+
+// buildSigningRequest is deterministic public construction with no clock or I/O.
+func (p *Planner) buildSigningRequest(plan *Plan, slot, unsigned string, ids RequestIDs) (*SigningRequest, error) {
 	d := requestData{Schema: RequestSchema, RequestID: ids.RequestID, SittingID: ids.SittingID, Slot: slot, Network: p.profile.Network, ExpiresAt: ids.ExpiresAt, PSBT: unsigned, PlanManifestUTF8: string(plan.raw), PlanSHA256: plan.digest, ReservationPlanSHA256: plan.digest}
 	var phase byte
 	if slot == "A" || slot == "B" {

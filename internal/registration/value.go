@@ -92,11 +92,10 @@ func (p *Planner) revealValues(raw []byte, reservationHash string, names []reser
 			return bad()
 		}
 		values[i] = b
-		if i == 0 {
-			if _, e := ParseValue(b); e != nil {
-				return bad()
-			}
-		} else if names[i].FutureValue.State != "fixed" || value != names[i].FutureValue.ValueHex || hash != names[i].FutureValue.ValueSHA256 {
+		if _, e := ParseValue(b); e != nil {
+			return bad()
+		}
+		if i == 1 && (names[i].FutureValue.State != "fixed" || value != names[i].FutureValue.ValueHex || hash != names[i].FutureValue.ValueSHA256) {
 			return bad()
 		}
 	}

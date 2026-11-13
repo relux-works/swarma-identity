@@ -52,6 +52,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, deps keyc
 		case "node health", "name show", "identity show", "address derive", "balance watch", "nostr profile-prepare", "nostr profile-verify", "grant draft", "grant consent", "grant sign", "grant ledger-recover":
 			e.Command = args[0] + " " + args[1]
 			e.Network, e.Result, f = execute(ctx, e.Command, args[2:])
+		case "registration account-pin", "registration reserve", "registration reveal", "registration request", "registration check-result":
+			e.Command = args[0] + " " + args[1]
+			e.Network, e.Result, f = executeRegistration(ctx, e.Command, args[2:])
 		case "keychain keygen", "keychain sign", "value build":
 			e.Command = args[0] + " " + args[1]
 			e.Network, e.Result, f = executeKeychain(ctx, e.Command, args[2:], deps)
