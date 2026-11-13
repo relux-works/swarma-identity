@@ -58,11 +58,11 @@ func (s *Signer) Keygen(label string) ([]byte, error) {
 	if err := store.Preflight(); err != nil {
 		return nil, err
 	}
-	switch _, err := store.Public(label); {
-	case err == nil:
-		return nil, keychain.ErrExists
-	case !errors.Is(err, keychain.ErrNotFound):
+	switch exists, err := store.Exists(label); {
+	case err != nil:
 		return nil, err
+	case exists:
+		return nil, keychain.ErrExists
 	}
 	sc := newScratch()
 	defer sc.wipe()
@@ -102,6 +102,9 @@ func (s *Signer) Public(label string) ([]byte, error) {
 		return nil, err
 	}
 	pub, err := store.Public(label)
+	if errors.Is(err, keychain.ErrNotFound) {
+		return nil, keychain.ErrPublicNotFound
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -126,12 +129,13 @@ func (s *Signer) withKey(label, reason string, step func(*scratch, *btcec.Public
 	}
 	sc := newScratch()
 	defer sc.wipe()
-	if err := store.Secret(label, reason, &sc.secret); err != nil {
+	metadata, err := store.Secret(label, reason, &sc.secret)
+	if err != nil {
 		return nil, err
 	}
 	ok := sc.loadKey()
 	clear(sc.secret[:])
-	if !ok || !bytes.Equal(sc.public(), stored) {
+	if !ok || !bytes.Equal(sc.public(), stored) || !bytes.Equal(sc.public(), metadata) {
 		return nil, keychain.ErrItem
 	}
 	return step(sc, pub)

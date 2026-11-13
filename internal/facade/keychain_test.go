@@ -66,7 +66,11 @@ func (r fixedReader) Read(p []byte) (int, error) { return copy(p, r), nil }
 
 // newKC holds the landlord's published BIP-340 test key 1 in a fake store.
 func newKC(t *testing.T, answer string) *kcHarness {
-	h := &kcHarness{t: t, store: keychainfake.New()}
+	return newKCWithStore(t, answer, keychainfake.New(), bip340Secrets[keyLandlord])
+}
+
+func newKCWithStore(t *testing.T, answer string, store *keychainfake.Store, secretHex string) *kcHarness {
+	h := &kcHarness{t: t, store: store}
 	h.term = &fakeTerminal{log: &h.log, answer: answer}
 	h.store.OnEvent = func(e string) {
 		if strings.HasPrefix(e, "secret:") && !h.keyRead {
@@ -74,7 +78,7 @@ func newKC(t *testing.T, answer string) *kcHarness {
 		}
 		h.log = append(h.log, e)
 	}
-	secret, _ := hex.DecodeString(bip340Secrets[keyLandlord])
+	secret, _ := hex.DecodeString(secretHex)
 	signer := keysign.NewWithStore(h.store, fixedReader(secret))
 	if _, err := signer.Keygen(kcLabel); err != nil {
 		t.Fatal(err)

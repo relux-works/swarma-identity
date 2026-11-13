@@ -17,7 +17,7 @@ type recordingStore struct {
 	log *[]string
 }
 
-func (r recordingStore) Secret(label, reason string, dst *[32]byte) error {
+func (r recordingStore) Secret(label, reason string, dst *[32]byte) ([]byte, error) {
 	*r.log = append(*r.log, "secret:"+label)
 	return r.Store.Secret(label, reason, dst)
 }

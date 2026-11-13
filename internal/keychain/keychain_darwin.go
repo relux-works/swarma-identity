@@ -13,8 +13,9 @@ package keychain
 #import <LocalAuthentication/LocalAuthentication.h>
 
 #define SK_SERVICE "works.relux.swarma-identity.grant-key"
+#define SK_PUBLIC_SERVICE SK_SERVICE ".pub"
 
-enum { SK_OK = 0, SK_NOT_FOUND = 1, SK_EXISTS = 2, SK_CANCELED = 3, SK_AUTH = 4, SK_BIOMETRY = 5, SK_ENTITLEMENT = 6, SK_ITEM = 7, SK_STORE = 8 };
+enum { SK_OK = 0, SK_NOT_FOUND = 1, SK_EXISTS = 2, SK_CANCELED = 3, SK_AUTH = 4, SK_BIOMETRY = 5, SK_ENTITLEMENT = 6, SK_ITEM = 7, SK_STORE = 8, SK_INTERACTION = 9 };
 
 static int sk_map(OSStatus st) {
 	switch (st) {
@@ -23,6 +24,7 @@ static int sk_map(OSStatus st) {
 	case errSecDuplicateItem: return SK_EXISTS;
 	case errSecUserCanceled: return SK_CANCELED;
 	case errSecAuthFailed: return SK_AUTH;
+	case errSecInteractionNotAllowed: return SK_INTERACTION; // -25308, not absence
 	case -34018: return SK_ENTITLEMENT; // errSecMissingEntitlement
 	}
 	return SK_STORE;
@@ -77,9 +79,14 @@ int sk_open(const char *path) {
 // the framework allocated on this process's heap when it decoded the reply.
 // CFDataGetBytePtr is declared const; the wipe writes through a cast because
 // the bytes would otherwise be freed with the secret in them. Any CFData
-// result is wiped, also one of an unexpected length.
+// result is wiped, including kSecValueData in an attributes-plus-data result
+// and data of an unexpected length.
 static void sk_release_read(CFTypeRef res) {
 	if (res == NULL) return;
+	if (CFGetTypeID(res) == CFDictionaryGetTypeID()) {
+		CFTypeRef data = CFDictionaryGetValue((CFDictionaryRef)res, kSecValueData);
+		if (data != NULL) { CFRetain(data); sk_release_read(data); }
+	}
 	if (CFGetTypeID(res) == CFDataGetTypeID()) {
 		volatile unsigned char *p = (volatile unsigned char *)CFDataGetBytePtr((CFDataRef)res);
 		size_t n = (size_t)CFDataGetLength((CFDataRef)res);
@@ -93,9 +100,9 @@ static void sk_release_read(CFTypeRef res) {
 	CFRelease(res);
 }
 
-static CFMutableDictionaryRef sk_query(const char *label, int add) {
+static CFMutableDictionaryRef sk_query(const char *label, const char *service, int add) {
 	CFMutableDictionaryRef q = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-	CFStringRef svc = CFStringCreateWithCString(NULL, SK_SERVICE, kCFStringEncodingUTF8);
+	CFStringRef svc = CFStringCreateWithCString(NULL, service, kCFStringEncodingUTF8);
 	CFStringRef acct = CFStringCreateWithCString(NULL, label, kCFStringEncodingUTF8);
 	CFDictionarySetValue(q, kSecClass, kSecClassGenericPassword);
 	CFDictionarySetValue(q, kSecAttrService, svc);
@@ -118,13 +125,22 @@ static CFMutableDictionaryRef sk_query(const char *label, int add) {
 	return q;
 }
 
-#ifdef SK_TESTMODE
-int sk_delete(const char *label) {
-	if (sk_test_kc == NULL) return SK_STORE;
-	CFMutableDictionaryRef q = sk_query(label, 0);
+// Deletion does not read a biometry-protected item or require authentication.
+static int sk_delete_item(const char *label, const char *service) {
+	CFMutableDictionaryRef q = sk_query(label, service, 0);
 	OSStatus st = SecItemDelete(q);
 	CFRelease(q);
 	return sk_map(st);
+}
+
+#ifdef SK_TESTMODE
+int sk_delete(const char *label) {
+	if (sk_test_kc == NULL) return SK_STORE;
+	int secret = sk_delete_item(label, SK_SERVICE);
+	int public = sk_delete_item(label, SK_PUBLIC_SERVICE);
+	if (secret != SK_OK && secret != SK_NOT_FOUND) return secret;
+	if (public != SK_OK && public != SK_NOT_FOUND) return public;
+	return secret == SK_OK || public == SK_OK ? SK_OK : SK_NOT_FOUND;
 }
 #endif
 
@@ -143,13 +159,13 @@ static int sk_preflight(void) {
 #endif
 }
 
-// sk_public returns the stored compressed public key (kSecAttrGeneric). It
-// never shows a prompt: the release query carries a context that forbids
-// interaction.
-static int sk_public(const char *label, unsigned char *out, int cap, int *outlen) {
+// All non-authenticated reads explicitly forbid UI. In particular, a secret
+// existence query must preserve -25308 rather than use UISkip (which hides it).
+static int sk_read_no_ui(const char *label, const char *service, int data, CFTypeRef *res) {
 	@autoreleasepool {
-		CFMutableDictionaryRef q = sk_query(label, 0);
-		CFDictionarySetValue(q, kSecReturnAttributes, kCFBooleanTrue);
+		CFMutableDictionaryRef q = sk_query(label, service, 0);
+		if (data) CFDictionarySetValue(q, kSecReturnData, kCFBooleanTrue);
+		else CFDictionarySetValue(q, kSecReturnAttributes, kCFBooleanTrue);
 		CFDictionarySetValue(q, kSecMatchLimit, kSecMatchLimitOne);
 		LAContext *ctx = nil;
 #ifndef SK_TESTMODE
@@ -157,27 +173,45 @@ static int sk_public(const char *label, unsigned char *out, int cap, int *outlen
 		ctx.interactionNotAllowed = YES;
 		CFDictionarySetValue(q, kSecUseAuthenticationContext, (const void *)ctx);
 #endif
-		CFTypeRef res = NULL;
-		OSStatus st = SecItemCopyMatching(q, &res);
+		OSStatus st = SecItemCopyMatching(q, res);
 		CFRelease(q);
 		if (ctx != nil) { [ctx invalidate]; [ctx release]; }
-		int rc = sk_map(st);
-		if (rc != SK_OK) { if (res != NULL) CFRelease(res); return rc; }
-		if (res == NULL || CFGetTypeID(res) != CFDictionaryGetTypeID()) { if (res != NULL) CFRelease(res); return SK_ITEM; }
-		CFTypeRef g = CFDictionaryGetValue((CFDictionaryRef)res, kSecAttrGeneric);
-		if (g == NULL || CFGetTypeID(g) != CFDataGetTypeID() || CFDataGetLength((CFDataRef)g) > cap) { CFRelease(res); return SK_ITEM; }
-		*outlen = (int)CFDataGetLength((CFDataRef)g);
-		memcpy(out, CFDataGetBytePtr((CFDataRef)g), *outlen);
-		CFRelease(res);
-		return SK_OK;
+		return sk_map(st);
 	}
 }
 
-// sk_create adds the item. Release: biometryCurrentSet, when-passcode-set,
-// this device only, not synchronizable.
+static int sk_probe_no_ui(const char *label, const char *service) {
+	CFTypeRef res = NULL;
+	int rc = sk_read_no_ui(label, service, 0, &res);
+	if (res != NULL) CFRelease(res); // attributes only; never request secret data
+	return rc;
+}
+
+static int sk_exists(const char *label) {
+	int rc = sk_probe_no_ui(label, SK_PUBLIC_SERVICE);
+	if (rc == SK_OK || rc == SK_INTERACTION) return SK_EXISTS;
+	if (rc != SK_NOT_FOUND) return rc;
+	rc = sk_probe_no_ui(label, SK_SERVICE);
+	if (rc == SK_OK || rc == SK_INTERACTION) return SK_EXISTS;
+	return rc;
+}
+
+// Only the separate, non-ACL public item is read before the signing display.
+static int sk_public(const char *label, unsigned char *out) {
+	CFTypeRef res = NULL;
+	int rc = sk_read_no_ui(label, SK_PUBLIC_SERVICE, 1, &res);
+	if (rc != SK_OK) { if (res != NULL) CFRelease(res); return rc; }
+	if (res == NULL || CFGetTypeID(res) != CFDataGetTypeID() || CFDataGetLength((CFDataRef)res) != 33) { if (res != NULL) CFRelease(res); return SK_ITEM; }
+	memcpy(out, CFDataGetBytePtr((CFDataRef)res), 33);
+	CFRelease(res);
+	return SK_OK;
+}
+
+// sk_create adds the protected secret, then a non-ACL public item. Release:
+// both are device-only, non-synchronizable data-protection items.
 static int sk_create(const char *label, const unsigned char *secret, const unsigned char *pub, int publen) {
 	@autoreleasepool {
-		CFMutableDictionaryRef q = sk_query(label, 1);
+		CFMutableDictionaryRef q = sk_query(label, SK_SERVICE, 1);
 		CFStringRef lbl = CFStringCreateWithFormat(NULL, NULL, CFSTR("Swarma grant key %s"), label);
 		CFDictionarySetValue(q, kSecAttrLabel, lbl);
 		CFRelease(lbl);
@@ -202,6 +236,24 @@ static int sk_create(const char *label, const unsigned char *secret, const unsig
 		CFRelease(sd);
 		OSStatus st = SecItemAdd(q, NULL);
 		CFRelease(q);
+		if (st != errSecSuccess) return sk_map(st);
+
+		q = sk_query(label, SK_PUBLIC_SERVICE, 1);
+		lbl = CFStringCreateWithFormat(NULL, NULL, CFSTR("Swarma grant public key %s"), label);
+		CFDictionarySetValue(q, kSecAttrLabel, lbl);
+		CFRelease(lbl);
+#ifndef SK_TESTMODE
+		CFDictionarySetValue(q, kSecAttrAccessible, kSecAttrAccessibleWhenUnlockedThisDeviceOnly);
+#endif
+		pd = CFDataCreate(NULL, pub, publen);
+		CFDictionarySetValue(q, kSecValueData, pd);
+		CFRelease(pd);
+		st = SecItemAdd(q, NULL);
+		CFRelease(q);
+		if (st != errSecSuccess) {
+			int rollback = sk_delete_item(label, SK_SERVICE);
+			if (rollback != SK_OK && rollback != SK_NOT_FOUND) return SK_STORE;
+		}
 		return sk_map(st);
 	}
 }
@@ -210,13 +262,14 @@ static int sk_create(const char *label, const unsigned char *secret, const unsig
 // with no reuse window, so every read is its own Touch ID evaluation; the
 // context is invalidated after the read. The framework's result is wiped
 // before it is released on every return path (sk_release_read).
-static int sk_secret(const char *label, const char *reason, unsigned char *out32) {
+static int sk_secret(const char *label, const char *reason, unsigned char *out32, unsigned char *public33) {
 #ifdef SK_TESTMODE
 	sk_test_read_wiped = 0;
 #endif
 	@autoreleasepool {
-		CFMutableDictionaryRef q = sk_query(label, 0);
+		CFMutableDictionaryRef q = sk_query(label, SK_SERVICE, 0);
 		CFDictionarySetValue(q, kSecReturnData, kCFBooleanTrue);
+		CFDictionarySetValue(q, kSecReturnAttributes, kCFBooleanTrue);
 		CFDictionarySetValue(q, kSecMatchLimit, kSecMatchLimitOne);
 		LAContext *ctx = nil;
 #ifndef SK_TESTMODE
@@ -233,8 +286,13 @@ static int sk_secret(const char *label, const char *reason, unsigned char *out32
 		if (ctx != nil) { [ctx invalidate]; [ctx release]; }
 		int rc = sk_map(st);
 		if (rc != SK_OK) { sk_release_read(res); return rc; }
-		if (res == NULL || CFGetTypeID(res) != CFDataGetTypeID() || CFDataGetLength((CFDataRef)res) != 32) { sk_release_read(res); return SK_ITEM; }
-		memcpy(out32, CFDataGetBytePtr((CFDataRef)res), 32);
+		if (res == NULL || CFGetTypeID(res) != CFDictionaryGetTypeID()) { sk_release_read(res); return SK_ITEM; }
+		CFTypeRef data = CFDictionaryGetValue((CFDictionaryRef)res, kSecValueData);
+		CFTypeRef generic = CFDictionaryGetValue((CFDictionaryRef)res, kSecAttrGeneric);
+		if (data == NULL || CFGetTypeID(data) != CFDataGetTypeID() || CFDataGetLength((CFDataRef)data) != 32 ||
+			generic == NULL || CFGetTypeID(generic) != CFDataGetTypeID() || CFDataGetLength((CFDataRef)generic) != 33) { sk_release_read(res); return SK_ITEM; }
+		memcpy(out32, CFDataGetBytePtr((CFDataRef)data), 32);
+		memcpy(public33, CFDataGetBytePtr((CFDataRef)generic), 33);
 		sk_release_read(res);
 		return SK_OK;
 	}
@@ -264,11 +322,30 @@ func statusErr(rc C.int) error {
 		return ErrEntitlement
 	case C.SK_ITEM:
 		return ErrItem
+	case C.SK_INTERACTION:
+		return ErrInteraction
 	}
 	return ErrStore
 }
 
 func (darwinStore) Preflight() error { return statusErr(C.sk_preflight()) }
+
+func (darwinStore) Exists(label string) (bool, error) {
+	if !ValidLabel(label) {
+		return false, ErrItem
+	}
+	cl := C.CString(label)
+	defer C.free(unsafe.Pointer(cl))
+	err := statusErr(C.sk_exists(cl))
+	switch err {
+	case ErrExists:
+		return true, nil
+	case ErrNotFound:
+		return false, nil
+	default:
+		return false, err
+	}
+}
 
 func (darwinStore) Public(label string) ([]byte, error) {
 	if !ValidLabel(label) {
@@ -276,16 +353,15 @@ func (darwinStore) Public(label string) ([]byte, error) {
 	}
 	cl := C.CString(label)
 	defer C.free(unsafe.Pointer(cl))
-	var buf [65]C.uchar
-	var n C.int
-	if err := statusErr(C.sk_public(cl, &buf[0], C.int(len(buf)), &n)); err != nil {
+	var buf [33]C.uchar
+	if err := statusErr(C.sk_public(cl, &buf[0])); err != nil {
 		return nil, err
 	}
-	return C.GoBytes(unsafe.Pointer(&buf[0]), n), nil
+	return C.GoBytes(unsafe.Pointer(&buf[0]), 33), nil
 }
 
 func (darwinStore) Create(label string, secret *[32]byte, public []byte) error {
-	if !ValidLabel(label) || len(public) == 0 || len(public) > 65 {
+	if !ValidLabel(label) || len(public) != 33 {
 		return ErrItem
 	}
 	cl := C.CString(label)
@@ -293,13 +369,17 @@ func (darwinStore) Create(label string, secret *[32]byte, public []byte) error {
 	return statusErr(C.sk_create(cl, (*C.uchar)(unsafe.Pointer(&secret[0])), (*C.uchar)(unsafe.Pointer(&public[0])), C.int(len(public))))
 }
 
-func (darwinStore) Secret(label, reason string, dst *[32]byte) error {
+func (darwinStore) Secret(label, reason string, dst *[32]byte) ([]byte, error) {
 	if !ValidLabel(label) || reason == "" {
-		return ErrItem
+		return nil, ErrItem
 	}
 	cl := C.CString(label)
 	defer C.free(unsafe.Pointer(cl))
 	cr := C.CString(reason)
 	defer C.free(unsafe.Pointer(cr))
-	return statusErr(C.sk_secret(cl, cr, (*C.uchar)(unsafe.Pointer(&dst[0]))))
+	var public [33]C.uchar
+	if err := statusErr(C.sk_secret(cl, cr, (*C.uchar)(unsafe.Pointer(&dst[0])), &public[0])); err != nil {
+		return nil, err
+	}
+	return C.GoBytes(unsafe.Pointer(&public[0]), 33), nil
 }

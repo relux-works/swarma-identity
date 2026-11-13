@@ -15,6 +15,7 @@ The landlord grant key signs BIP-340 grant digests and the ECDSA P2PKH spend of 
 
 The setup protects against:
 - **Key exfiltration from the Mac by other processes.** The item is stored in the data protection keychain under `SecAccessControl` with `biometryCurrentSet` and `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`, and it is not synchronizable. Every read needs a Touch ID match from the fingerprints enrolled when the item was created; enrolling a new finger invalidates the item. The item never leaves this device: it is not in iCloud Keychain or in backups that restore to another device.
+- **Public-key substitution.** The compressed 33-byte public key is also stored as the value of a separate generic-password item: service `works.relux.swarma-identity.grant-key.pub`, the same label/account, data protection keychain, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, not synchronizable, with no biometry access control. This public data is read without interaction before the display. The protected secret item's `kSecAttrGeneric` retains the same public key. After confirmation and Touch ID, the signer derives the public key from the authenticated secret and requires it to equal **both** the separate public item and the authenticated `kSecAttrGeneric`. A swap is detected with `KEY_ITEM_INVALID` after Touch ID and before any signature is returned. A missing public item refuses with `KEY_PUBLIC_NOT_FOUND` before the display or Touch ID. The public item is not an authority to sign.
 - **Signing something other than what was shown.** `keychain sign` re-derives each requested digest before showing anything, as the SHA-256 of the exact bytes the display then shows:
   - `contract_sha256` is the SHA-256 of the draft's contract bytes.
   - `grant_signing_hash` is the SHA-256 of `swarma-grant-v3` followed by the canonical grant (`rental.Grant.Canonical`), built from the draft, the grantee's verified consent event and the verified `landlord_sig`. rental's own `SigningHash` must give the same value, so a change to the signing construction fails closed.
@@ -106,7 +107,7 @@ Other limits:
 
 ### `keychain keygen --label NAME [--network main|test|regtest] --json`
 
-`NAME` is 1..63 bytes of `[a-z0-9._-]`, starting with `[a-z0-9]`; the network defaults to `main`. The command first checks that Touch ID is usable (`BIOMETRY_UNAVAILABLE` otherwise) and that no item uses the label (`KEY_EXISTS`); in either case it draws no entropy and creates nothing. It then generates the key from the OS CSPRNG, stores it, re-reads the stored public key, and returns:
+`NAME` is 1..63 bytes of `[a-z0-9._-]`, starting with `[a-z0-9]`; the network defaults to `main`. The command first checks that Touch ID is usable (`BIOMETRY_UNAVAILABLE` otherwise) and that neither the public nor the protected secret item uses the label (`KEY_EXISTS`); in either case it draws no entropy and creates nothing. An existing public item reserves the label; if it is absent, a no-interaction secret query returning `errSecInteractionNotAllowed` (-25308) also means `KEY_EXISTS`, never `KEYCHAIN_ERROR`. It then generates the key from the OS CSPRNG, adds the protected secret and its public metadata, and adds the separate non-ACL public item. If the public add fails, it deletes the just-added secret without authentication and refuses. It re-reads only the separate public item without interaction, checks it against the generated public key, and returns:
 
 ```json
 {"label":"…","network":"main","xonly_key":"<64 hex>","compressed_pubkey":"<66 hex>","p2pkh_address":"N…/M…"}
@@ -162,13 +163,13 @@ Refusal codes:
 
 | Codes | Meaning |
 | --- | --- |
-| `KEY_NOT_FOUND`, `KEY_ITEM_INVALID` | The item is missing, or it does not hold the stored key. |
+| `KEY_NOT_FOUND`, `KEY_PUBLIC_NOT_FOUND`, `KEY_ITEM_INVALID` | The secret is missing, the separate public item is missing (before Touch ID), or either public copy disagrees with the authenticated secret (after Touch ID). |
 | `KEY_MISMATCH`, `DIGEST_BINDING`, PR 8 codes | The request is not bound to this key and draft. |
 | `SEAL_OUTPOINT_MISMATCH`, `SEAL_SCRIPT_MISMATCH`, `SEAL_SPEND_*` | The seal spend is not acceptable. |
 | `NO_TERMINAL` | There is no controlling terminal. |
 | `CONFIRMATION_DECLINED` | The human did not type `SIGN`. |
 | `AUTH_CANCELED`, `AUTH_FAILED` | The Touch ID prompt was canceled or failed. |
-| `KEYCHAIN_ENTITLEMENT` | See [Open item](#open-item-code-signing-for-the-data-protection-keychain). |
+| `KEYCHAIN_ENTITLEMENT` | See [Developer ID signing](#developer-id-signing-for-the-data-protection-keychain). |
 | `SIGNATURE_VERIFY` | A produced signature did not verify. |
 
 ### `value build --grant-xonly HEX --social-descriptor FILE --json`
@@ -185,31 +186,38 @@ Any difference is `VALUE_MISMATCH`. The result is `{value,value_hex,bytes,grant_
 
 ## Ivan's sitting
 
-Nothing below runs before the sitting. Build the tool on Ivan's Mac from the reviewed commit:
+The acceptance gate is Ivan's dry run on his Mac with a **Developer-ID-signed app bundle**: keygen, sign a fixture request, then delete both dry-run items. Only after that gate passes is the real key created. Build from the reviewed commit:
 
 ```sh
 git clone https://github.com/relux-works/swarma-identity && cd swarma-identity
 git checkout <reviewed commit>
-mkdir -p .temp/bin && go build -o .temp/bin/swarma-keychain ./cmd/swarma-keychain && go build -o .temp/bin/swarma-identity ./cmd/swarma-identity
+mkdir -p .temp/bin
+go build -o .temp/bin/swarma-identity ./cmd/swarma-identity
+.scripts/build-keychain-bundle.sh /absolute/path/to/swarma-keychain-DevID.provisionprofile
+KEYCHAIN_CLI="$PWD/.temp/SwarmaKeychain.app/Contents/MacOS/swarma-keychain"
 ```
 
 1. **Dry run with a throwaway label, then the real key.** The dry run checks Touch ID and the entitlement path:
    ```sh
-   .temp/bin/swarma-keychain keychain keygen --label dryrun-2026-11 --json
+   "$KEYCHAIN_CLI" keychain keygen --label dryrun-2026-11 --json
    ```
-   Expect public data only. Remove the dry-run item afterwards in Keychain Access, under the data protection ("iCloud"/"Local Items") section; search for "Swarma grant key dryrun-2026-11". Then create the real key:
+   Expect public data only. Prepare a `swarma-keychain/sign/1` fixture request bound to this returned key (the request format above), then:
    ```sh
-   .temp/bin/swarma-keychain keychain keygen --label ivanopcode-grant-1 --json
+   "$KEYCHAIN_CLI" keychain sign --label dryrun-2026-11 --request .temp/dryrun-sign.json --json
+   ```
+   Read the display, type `SIGN`, and authenticate with Touch ID; check that the public signatures verify. Remove **both** dry-run items afterwards in Keychain Access, under the data protection ("iCloud"/"Local Items") section: "Swarma grant key dryrun-2026-11" (service `works.relux.swarma-identity.grant-key`) and "Swarma grant public key dryrun-2026-11" (service `works.relux.swarma-identity.grant-key.pub`). Their account is `dryrun-2026-11`. Deletion does not require reading the protected secret. Confirm both are gone. Then create the real key:
+   ```sh
+   "$KEYCHAIN_CLI" keychain keygen --label ivanopcode-grant-1 --json
    ```
    Record `xonly_key`, `compressed_pubkey` and `p2pkh_address`. Nothing secret is printed.
 2. **Build the new landlord value.** Extract the current `nostr` descriptor of `id/ivanopcode` with `.temp/bin/swarma-identity name show` (`value_hex` → bytes → `.nostr`) into `social.json`, then:
    ```sh
-   .temp/bin/swarma-keychain value build --grant-xonly <xonly_key> --social-descriptor social.json --json
+   "$KEYCHAIN_CLI" value build --grant-xonly <xonly_key> --social-descriptor social.json --json
    ```
    Hand `value_hex` to the lead node. The lead node decodes it, runs `testmempoolaccept` and broadcasts the `name_update` once.
 3. **Sign grants with the new key, after the name_update confirms.** Run `grant draft` and `grant consent` as before. Put the draft and the `to_sign` entries into a `swarma-keychain/sign/1` request and run:
    ```sh
-   .temp/bin/swarma-keychain keychain sign --label ivanopcode-grant-1 --request req.json --json
+   "$KEYCHAIN_CLI" keychain sign --label ivanopcode-grant-1 --request req.json --json
    ```
    Read the display, type `SIGN`, and touch the sensor once per signature. `landlord_sig` goes into `grant sign`. The grant stage's `grant_signing_hash` goes into a second sign request with `consent_event` and `landlord_sig`. The seal-spend signature goes into the spend transaction's input script.
 
@@ -217,17 +225,49 @@ mkdir -p .temp/bin && go build -o .temp/bin/swarma-keychain ./cmd/swarma-keychai
 
 There is none. The item is device-bound and biometry-bound: it cannot be exported, it does not sync and it does not survive a Touch ID re-enrollment or a new Mac. If it is lost, deleted, or invalidated by enrolling a new fingerprint, the key is gone. The only remedy is a rotation: create a new key with `keygen`, then run `value build` and a `name_update` of `id/ivanopcode` with the new x-only key, signed by the name's owner wallet. Grants issued under the old key remain verifiable against the chain history, but no new grant can be signed with it.
 
-## Open item: code signing for the data protection keychain
+## Developer ID signing for the data protection keychain
 
-Biometry access control exists only in the data protection keychain. macOS may require a keychain-access-group entitlement there, which an ad-hoc `go build` binary does not have. In that case, writing the item fails with `errSecMissingEntitlement` (-34018), which the tool reports as `KEYCHAIN_ENTITLEMENT`.
+**Entitlement decision closed, owner evidence 2026-11-13.** The ad-hoc `go build` binary returned `KEYCHAIN_ENTITLEMENT` (`errSecMissingEntitlement`, -34018) on Ivan's Mac (Darwin 27.2, Xcode 27, Go 1.26.8). Ivan chose option 1: sign with the Relux Works Developer ID. The bundle below passed `codesign --verify --strict`, and its `SecItemAdd` of the biometry-protected item succeeded. The subsequent protected public-key re-read failed with LAError -1004 → -25308; that separate product defect is addressed by the two-item layout above. This signing evidence closes the entitlement question, not the revised tool's Mac acceptance gate.
 
-Evidence so far, from hosted CI run 43322768154 on macOS 15: an ad-hoc-signed test binary's read-only lookup of a random label in the data protection keychain returned `KEY_NOT_FOUND`, not the entitlement error. Whether `SecItemAdd` with the biometry access control succeeds for an unsigned binary is not established, because CI has no Touch ID and never writes there. The dry run in step 1 settles it. If keygen returns `KEYCHAIN_ENTITLEMENT`, the binary needs to be signed with an entitlement (see `UNRESOLVED_QUESTIONS.md`).
+The verified provisioning setup is:
+
+- Explicit macOS App ID `works.relux.swarma-keychain`, no capabilities, team `262RZ595FP`.
+- Developer ID profile `swarma-keychain DevID`, `ProvisionsAllDevices`, `keychain-access-groups = 262RZ595FP.*`; Developer ID Application certificate serial `2480D282829042976C97FE6A3CF49F34`, expires 2031-07-06.
+- `SwarmaKeychain.app/Contents/Info.plist` declares `CFBundleIdentifier = works.relux.swarma-keychain`, `CFBundleExecutable = swarma-keychain`, and `LSUIElement = true`.
+- `Contents/MacOS/swarma-keychain` is the release binary; `Contents/embedded.provisionprofile` is the profile.
+- Entitlements: `com.apple.application-identifier = 262RZ595FP.works.relux.swarma-keychain`, `com.apple.developer.team-identifier = 262RZ595FP`, and `keychain-access-groups = [262RZ595FP.works.relux.swarma-keychain]`.
+
+From the repository root on the owner's Mac, with that profile and the installed Developer ID Application identity:
+
+```sh
+.scripts/build-keychain-bundle.sh /absolute/path/to/swarma-keychain-DevID.provisionprofile
+# Optional second argument selects a new output .app path.
+codesign --verify --strict .temp/SwarmaKeychain.app
+.temp/SwarmaKeychain.app/Contents/MacOS/swarma-keychain keychain keygen --label dryrun-2026-11 --json
+```
+
+The script creates the bundle and entitlement plist under `.temp/` by default, builds without inherited Go test tags, and runs exactly:
+
+```sh
+codesign --force --options runtime --entitlements .temp/SwarmaKeychain.entitlements.plist \
+  --sign "Developer ID Application: Relux Works, LLC (262RZ595FP)" .temp/SwarmaKeychain.app
+codesign --verify --strict .temp/SwarmaKeychain.app
+```
+
+The owner/co-lead supplies the profile and signs on the Mac. Neither a signing certificate nor a private signing key is shipped in this repository. A bare ad-hoc build is not the sitting executable.
+
+## Why hosted CI missed the defect
+
+The owner's signed-build log showed a successful secret add, followed by a failed non-interactive attributes read. His attributes/reference-only probe found -25308 with an interaction-forbidden `LAContext`, while `kSecUseAuthenticationUISkip` hid the existing item as -25300. `SecItemDelete` succeeded without authentication. Thus even reading protected attributes or references requires authentication on that Mac; public metadata cannot be read from the protected item before the display.
+
+Hosted macOS CI uses a throwaway **file** keychain with no biometry ACL. It checks the native two-item round trip and result wiping, but cannot establish this data-protection/biometry behaviour. `keychainfake.InteractionRequired` models every unauthenticated protected-item read as interaction-required. The positive test runs keygen then all signing paths in that mode. Five named negatives cover a protected-only duplicate (and a public-only duplicate), missing public item before Touch ID, swapped public item after Touch ID, failed public add with secret rollback, and swapped authenticated `kSecAttrGeneric`. The calibration restores the old protected-item public read and requires the same positive test to fail specifically with interaction-required, not a build error. The owner's signed-bundle dry run remains required.
 
 ## Tests
 
 | Where | What |
 | --- | --- |
 | any platform | all BIP-340 signing vectors (0..3, 15..18) and btcec's RFC 6979 vectors through the package's own signers; byte-for-byte agreement with the library signers on random inputs; the DER encoder against the library's at every minimal-encoding boundary; the wipeable SHA-256/HMAC, k·G and inverse against the standard library and btcec; every scratch field zero after each signer call returns (success and refusal paths); a signature refused for a foreign key held only in the scratch and zero after the wipe; the binary exits with the result's code right after its one envelope; ECDSA low-S against the high-S twin; duplicate inputs refused in both encodings; supplied prevouts that disagree with a full previous transaction refused; every sighash-committed field in the display; every field of each BIP-340 digest's preimage in the pre-key-read display, derived from PR 8's bytes, with a re-stamped consent time shown as differing and three planted display omissions killed; the legacy sighash against an independent implementation; keygen refusals; display before key read; refusal on decline; 12 digest-binding refusals; seal-spend refusals and a PSBT positive control; secret scan over all outputs and fds; value build vector and refusals; binary closure |
+| any platform, interaction-required fake | `TestKeychainInteractionRequiredKeygenSign`; five negatives `ExistingItem`, `MissingPublic`, `SwappedPublic`, `PublicAddRollback`, `SwappedGeneric` (each prefixed `TestKeychainInteractionRequired`); `TestKeychainInteractionRequiredCalibration` kills the old protected-public read. |
 | macOS CI, tag `keychaintest` | a throwaway file keychain made by `security create-keychain` in the job (never the login keychain): store round trip, duplicate label, path guard; the Keychain read result wiped before release; keygen → sign → PR 8 `grant sign` end to end |
 | macOS CI, release build | release-store preflight refuses on the runner (no biometry); a read-only lookup of a random label returns no item |
 | CI Build step | release `swarma-keychain` and `swarma-identity` binaries do not contain the test keychain selector (positive control: the `keychaintest` build does) |

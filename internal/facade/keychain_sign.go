@@ -84,7 +84,7 @@ func (t *ttyTerminal) Confirm(prompt string) (bool, error) {
 // keychainCodes are the signer's error codes (internal/keychain and
 // internal/keysign errors are their code strings). facade does not import
 // the Keychain store, so swarma-identity links none of it.
-var keychainCodes = map[string]bool{"KEY_NOT_FOUND": true, "KEY_EXISTS": true, "AUTH_CANCELED": true, "AUTH_FAILED": true, "BIOMETRY_UNAVAILABLE": true,
+var keychainCodes = map[string]bool{"KEY_NOT_FOUND": true, "KEY_PUBLIC_NOT_FOUND": true, "KEY_EXISTS": true, "AUTH_CANCELED": true, "AUTH_FAILED": true, "BIOMETRY_UNAVAILABLE": true,
 	"KEYCHAIN_ENTITLEMENT": true, "KEY_ITEM_INVALID": true, "KEYCHAIN_ERROR": true, "KEYCHAIN_TEST_PATH": true, "SIGNATURE_VERIFY": true}
 
 const errItem = "KEY_ITEM_INVALID"
