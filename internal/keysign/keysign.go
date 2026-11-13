@@ -4,10 +4,11 @@
 // authentication. Signing is implemented here (BIP-340 and RFC 6979 ECDSA
 // over btcec's scalar and point primitives) rather than through the
 // library's signers, because those keep copies of the key and nonce in
-// buffers they never clear. Every secret this package computes lives in one
-// scratch value that is wiped on every return path; docs/KEYCHAIN.md
-// "Residual memory" names what the curve library and the Go runtime still
-// keep outside it. Every signature is verified
+// buffers they never clear. Every secret-bearing value this package names —
+// including its SHA-256 working state and the verifier's copy of an
+// unverified S — lives in one scratch value that is wiped on every return
+// path; docs/KEYCHAIN.md "Residual memory" names what the curve library, the
+// compiler and the Go runtime still keep outside it. Every signature is verified
 // with the library against the stored public key before it is returned.
 // Only the swarma-keychain binary links this package; swarma-identity never
 // does.
@@ -183,21 +184,26 @@ func (s *Signer) SignECDSA(label, reason string, hash []byte) ([]byte, error) {
 
 // signECDSA signs with the key loaded in sc and returns a copy of the DER
 // signature only if it is low-S and the library's verification accepts it
-// for pub. A refused signature exists only in sc.out and sc.s.
+// for pub. A refused signature exists in this package only in sc.out, sc.s
+// and the verifier's copy of S, sc.vs; the caller's wipe clears all three.
 func signECDSA(sc *scratch, pub *btcec.PublicKey, hash []byte) ([]byte, error) {
 	n := sc.ecdsaSign((*[32]byte)(hash))
-	if !LowSVerifies(sc.out[:n], hash, pub) {
+	if !sc.lowSVerifies(sc.out[:n], hash, pub) {
 		return nil, ErrSignature
 	}
 	return bytes.Clone(sc.out[:n]), nil
 }
 
-// LowSVerifies parses strict DER, requires S <= n/2 and verifies.
-func LowSVerifies(der, hash []byte, pub *btcec.PublicKey) bool {
+// lowSVerifies parses der as strict DER, requires S <= n/2 and verifies it
+// with the library. The S it inspects is copied into sc.vs, not into a local,
+// so the caller's wipe of sc clears it on every path, refusal included. The
+// library's parsed signature is its own copy (docs/KEYCHAIN.md "Residual
+// memory").
+func (sc *scratch) lowSVerifies(der, hash []byte, pub *btcec.PublicKey) bool {
 	sig, err := ecdsa.ParseDERSignature(der)
 	if err != nil {
 		return false
 	}
-	s := sig.S()
-	return !s.IsOverHalfOrder() && sig.Verify(hash, pub)
+	sc.vs = sig.S()
+	return !sc.vs.IsOverHalfOrder() && sig.Verify(hash, pub)
 }

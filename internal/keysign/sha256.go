@@ -6,15 +6,19 @@ import (
 )
 
 // hashState is SHA-256 (FIPS 180-4) with its whole state — chaining value,
-// block buffer and message schedule — in one value the caller wipes. The
-// standard library's digest keeps its buffer where this package cannot clear
-// it, so every hash over secret bytes (the BIP-340 nonce input, the RFC 6979
-// HMAC key and output) uses this one. TestSHA256MatchesStdlib pins it to
-// crypto/sha256.
+// block buffer, message schedule, the eight working variables and the two
+// round temporaries — in one value the caller wipes. The standard library's
+// digest keeps its buffer where this package cannot clear it, so every hash
+// over secret bytes (the BIP-340 nonce input, the RFC 6979 HMAC key and
+// output) uses this one. block, sum and write declare no named local that
+// holds state words; TestHashCodeHasNoSecretLocals pins that, and
+// TestSHA256MatchesStdlib pins the function to crypto/sha256.
 type hashState struct {
-	h   [8]uint32
-	x   [64]byte
-	w   [64]uint32
+	h   [8]uint32  // chaining value H0..H7
+	x   [64]byte   // block buffer
+	w   [64]uint32 // message schedule W0..W63
+	v   [8]uint32  // working variables a..h of the compression function
+	t   [2]uint32  // round temporaries T1, T2
 	nx  int
 	len uint64
 }
@@ -51,31 +55,38 @@ func (d *hashState) write(p []byte) {
 	}
 }
 
+// block compresses d.x into d.h. Every intermediate word is stored in d (w,
+// v, t), never in a named local, so the caller's wipe of d reaches it.
 func (d *hashState) block() {
-	w := &d.w
 	for i := 0; i < 16; i++ {
-		w[i] = binary.BigEndian.Uint32(d.x[4*i:])
+		d.w[i] = binary.BigEndian.Uint32(d.x[4*i:])
 	}
 	for i := 16; i < 64; i++ {
-		v1, v2 := w[i-2], w[i-15]
-		s1 := bits.RotateLeft32(v1, -17) ^ bits.RotateLeft32(v1, -19) ^ (v1 >> 10)
-		s0 := bits.RotateLeft32(v2, -7) ^ bits.RotateLeft32(v2, -18) ^ (v2 >> 3)
-		w[i] = s1 + w[i-7] + s0 + w[i-16]
+		// W[i] = sigma1(W[i-2]) + W[i-7] + sigma0(W[i-15]) + W[i-16]
+		d.w[i] = (bits.RotateLeft32(d.w[i-2], -17) ^ bits.RotateLeft32(d.w[i-2], -19) ^ (d.w[i-2] >> 10)) +
+			d.w[i-7] +
+			(bits.RotateLeft32(d.w[i-15], -7) ^ bits.RotateLeft32(d.w[i-15], -18) ^ (d.w[i-15] >> 3)) +
+			d.w[i-16]
 	}
-	a, b, c, dd, e, f, g, h := d.h[0], d.h[1], d.h[2], d.h[3], d.h[4], d.h[5], d.h[6], d.h[7]
+	// v = a, b, c, d, e, f, g, h.
+	d.v = d.h
 	for i := 0; i < 64; i++ {
-		t1 := h + (bits.RotateLeft32(e, -6) ^ bits.RotateLeft32(e, -11) ^ bits.RotateLeft32(e, -25)) + ((e & f) ^ (^e & g)) + sha256K[i] + w[i]
-		t2 := (bits.RotateLeft32(a, -2) ^ bits.RotateLeft32(a, -13) ^ bits.RotateLeft32(a, -22)) + ((a & b) ^ (a & c) ^ (b & c))
-		h, g, f, e, dd, c, b, a = g, f, e, dd+t1, c, b, a, t1+t2
+		// T1 = h + Sigma1(e) + Ch(e, f, g) + K[i] + W[i]
+		d.t[0] = d.v[7] +
+			(bits.RotateLeft32(d.v[4], -6) ^ bits.RotateLeft32(d.v[4], -11) ^ bits.RotateLeft32(d.v[4], -25)) +
+			((d.v[4] & d.v[5]) ^ (^d.v[4] & d.v[6])) +
+			sha256K[i] + d.w[i]
+		// T2 = Sigma0(a) + Maj(a, b, c)
+		d.t[1] = (bits.RotateLeft32(d.v[0], -2) ^ bits.RotateLeft32(d.v[0], -13) ^ bits.RotateLeft32(d.v[0], -22)) +
+			((d.v[0] & d.v[1]) ^ (d.v[0] & d.v[2]) ^ (d.v[1] & d.v[2]))
+		// h, g, f, e, d, c, b, a = g, f, e, d+T1, c, b, a, T1+T2
+		copy(d.v[1:], d.v[:7])
+		d.v[4] += d.t[0]
+		d.v[0] = d.t[0] + d.t[1]
 	}
-	d.h[0] += a
-	d.h[1] += b
-	d.h[2] += c
-	d.h[3] += dd
-	d.h[4] += e
-	d.h[5] += f
-	d.h[6] += g
-	d.h[7] += h
+	for i := range d.h {
+		d.h[i] += d.v[i]
+	}
 }
 
 var padByte = [1]byte{0x80}
@@ -91,8 +102,8 @@ func (d *hashState) sum(out *[32]byte) {
 	var lb [8]byte
 	binary.BigEndian.PutUint64(lb[:], length)
 	d.write(lb[:])
-	for i, v := range d.h {
-		binary.BigEndian.PutUint32(out[4*i:], v)
+	for i := range d.h {
+		binary.BigEndian.PutUint32(out[4*i:], d.h[i])
 	}
 }
 

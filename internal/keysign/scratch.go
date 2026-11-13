@@ -8,11 +8,14 @@ import (
 // bytes read from the store, the private scalar and its byte form, the
 // BIP-340 nonce derivation (aux, t, rand), the RFC 6979 HMAC_DRBG state and
 // its input, the nonce and its inverse, the point accumulators of k*G, the
-// hash and MAC states that consume secret input, the products that mix the
-// key into a public value, and the signature itself until it has verified.
-// Nothing secret is held anywhere else in this package, and no library
+// hash and MAC states that consume secret input (chaining value, buffer,
+// message schedule, working variables and round temporaries), the products
+// that mix the key into a public value, and the signature itself — including
+// the verifier's copy of S — until it has verified. No named variable
+// elsewhere in this package holds a secret-bearing value, and no library
 // routine is given the secret except as a pointer into this struct. The
-// library routines keep their own arithmetic temporaries in their frames;
+// library routines keep their own arithmetic temporaries in their frames,
+// and the compiler keeps unnamed expression values in registers;
 // docs/KEYCHAIN.md "Residual memory" names them.
 //
 // One scratch is allocated per operation and wipe runs on every return path
@@ -32,13 +35,14 @@ type scratch struct {
 	kinv   btcec.ModNScalar // ECDSA k^-1
 	mix    btcec.ModNScalar // e*d (BIP-340) or r*d + e (ECDSA) before it is public
 	s      btcec.ModNScalar // ECDSA s = k^-1 * (r*d + e), public only once it verifies
+	vs     btcec.ModNScalar // the verifier's copy of S parsed from out (lowSVerifies), public only once it verifies
 	out    [72]byte         // the signature bytes (64 BIP-340, at most 72 DER), public only once they verify
 	kb     [32]byte         // the bytes of the scalar being multiplied by G
 	acc    btcec.JacobianPoint
 	P      btcec.JacobianPoint // d'*G (public once affine)
 	R      btcec.JacobianPoint // k*G (public once affine)
-	h      hashState
-	mac    hmacState
+	h      hashState           // BIP-340 tagged hashes (aux, nonce, challenge)
+	mac    hmacState           // RFC 6979 HMAC_DRBG
 }
 
 // scratchHook, when set (tests only), receives each operation's scratch as it
@@ -74,6 +78,7 @@ func (sc *scratch) wipe() {
 	sc.kinv.Zero()
 	sc.mix.Zero()
 	sc.s.Zero()
+	sc.vs.Zero()
 	clear(sc.out[:])
 	clear(sc.kb[:])
 	sc.acc = btcec.JacobianPoint{}

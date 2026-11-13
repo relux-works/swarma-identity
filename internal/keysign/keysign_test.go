@@ -8,8 +8,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -139,7 +143,8 @@ var rfc6979Vectors = []struct{ key, msg, nonce, sig string }{
 // (vector 2 is the case where the raw S is above n/2), through the
 // production path that returns it only after library verification; the
 // same path refuses it for a different public key, returns no bytes, and
-// leaves the refused DER and s only in the scratch, which the wipe clears.
+// leaves the refused DER, s and the verifier's copy of S (vs) only in the
+// scratch, which the wipe clears.
 func TestRFC6979Vectors(t *testing.T) {
 	for i, v := range rfc6979Vectors {
 		hash := sha256.Sum256([]byte(v.msg))
@@ -162,11 +167,11 @@ func TestRFC6979Vectors(t *testing.T) {
 		if got, err := signECDSA(sc, other, hash[:]); got != nil || !errors.Is(err, ErrSignature) {
 			t.Fatalf("vector %d: signature for a foreign key not refused", i)
 		}
-		if hex.EncodeToString(sc.out[:len(v.sig)/2]) != v.sig || sc.s.IsZero() {
+		if hex.EncodeToString(sc.out[:len(v.sig)/2]) != v.sig || sc.s.IsZero() || !sc.vs.Equals(&sc.s) {
 			t.Fatalf("vector %d: the refused signature is not where the wipe reaches", i)
 		}
 		sc.wipe()
-		if sc.out != [72]byte{} || !sc.s.IsZero() {
+		if sc.out != [72]byte{} || sc.s != (btcec.ModNScalar{}) || sc.vs != (btcec.ModNScalar{}) {
 			t.Fatalf("vector %d: refused signature survives the wipe", i)
 		}
 	}
@@ -330,16 +335,18 @@ func TestPointAndInverseMatchLibrary(t *testing.T) {
 }
 
 // Claim: every ECDSA signature this signer makes is strict DER and low-S and
-// verifies, and LowSVerifies refuses the high-S twin of each (the same
+// verifies, and lowSVerifies refuses the high-S twin of each (the same
 // signature with S negated), which plain ECDSA verification would accept.
 func TestECDSALowS(t *testing.T) {
 	_, pub := btcec.PrivKeyFromBytes(mustHex(t, vectors[1].secret))
+	verifier := newScratch()
+	defer verifier.wipe()
 	for i := 0; i < 64; i++ {
 		h := sha256.Sum256([]byte{byte(i)})
 		sc := loaded(t, mustHex(t, vectors[1].secret))
 		der, err := signECDSA(sc, pub, h[:])
 		sc.wipe()
-		if err != nil || !LowSVerifies(der, h[:], pub) {
+		if err != nil || !verifier.lowSVerifies(der, h[:], pub) {
 			t.Fatalf("hash %d: %v", i, err)
 		}
 		sig, _ := ecdsa.ParseDERSignature(der)
@@ -349,7 +356,7 @@ func TestECDSALowS(t *testing.T) {
 		if !high.Verify(h[:], pub) {
 			t.Fatal("high-S twin does not verify as plain ECDSA; the control is void")
 		}
-		if LowSVerifies(HighSDER(r, s), h[:], pub) {
+		if verifier.lowSVerifies(HighSDER(r, s), h[:], pub) {
 			t.Fatalf("hash %d: high-S signature accepted", i)
 		}
 	}
@@ -566,6 +573,238 @@ func TestScratchClearedOnEveryReturn(t *testing.T) {
 		name := all.Field(i).Name
 		if name != "kb" && name != "acc" && !used[name] {
 			t.Errorf("field %s never populated before a wipe: the zero check on it is vacuous", name)
+		}
+	}
+}
+
+// workingValues names the package's own hash and verifier working values in
+// sc that are not all zero: for each SHA-256 state (the BIP-340 hash and the
+// HMAC inner and outer hashes) its chaining value, buffer, schedule, working
+// variables a..h, round temporaries T1/T2 and counters; the HMAC pad; and the
+// verifier's copy of S.
+func workingValues(sc *scratch) []string {
+	var out []string
+	add := func(name string, nonzero bool) {
+		if nonzero {
+			out = append(out, name)
+		}
+	}
+	for _, hs := range []struct {
+		name string
+		d    *hashState
+	}{{"h", &sc.h}, {"mac.inner", &sc.mac.inner}, {"mac.outer", &sc.mac.outer}} {
+		add(hs.name+".h", hs.d.h != [8]uint32{})
+		add(hs.name+".x", hs.d.x != [64]byte{})
+		add(hs.name+".w", hs.d.w != [64]uint32{})
+		add(hs.name+".v", hs.d.v != [8]uint32{})
+		add(hs.name+".t", hs.d.t != [2]uint32{})
+		add(hs.name+".count", hs.d.nx != 0 || hs.d.len != 0)
+	}
+	add("mac.pad", sc.mac.pad != [64]byte{})
+	add("vs", sc.vs != btcec.ModNScalar{})
+	return out
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
+
+// Claim: the SHA-256 working variables a..h, the round temporaries T1/T2 and
+// the message schedule of every hash this package runs over secret input, and
+// the verifier's copy of an ECDSA S, are held in the operation's scratch and
+// are zero once the call that allocated it has returned — on success
+// (public SignECDSA and SignSchnorr), on verification refusal, on error
+// returns (authentication canceled, aux entropy failure) and on a panic
+// after signing. Observed through scratchHook after the call returned, with
+// a per-case positive control: just before the wipe, the values the case
+// exercises were populated, so a design that kept them in named locals
+// (outside the scratch) fails here as "not populated".
+// Refusal paths: the BIP-340 refusal goes through public SignSchnorr with a
+// fault injected by its aux entropy reader (the private scalar in the
+// scratch is moved off the stored key after the key check, so the library's
+// verification refuses). ECDSA verification refusal is not reachable through
+// public SignECDSA without fault injection (nothing runs between the key
+// check and the verification), so that case runs the same withKey wrapper
+// with the production signECDSA step and a foreign public key.
+// Limit: this observes the package's own named values only; registers,
+// unnamed compiler temporaries and the curve library's frames are the
+// documented residual (docs/KEYCHAIN.md "Residual memory").
+func TestOwnedWorkingStateCleared(t *testing.T) {
+	var seen []*scratch
+	var used []string
+	scratchHook = func(sc *scratch) { seen = append(seen, sc) }
+	scratchUsed = func(sc *scratch) { used = append(used, workingValues(sc)...) }
+	t.Cleanup(func() { scratchHook, scratchUsed = nil, nil })
+	h := sha256.Sum256([]byte("digest"))
+	_, foreign := btcec.PrivKeyFromBytes(mustHex(t, vectors[2].secret))
+	hashed := []string{"h.v", "h.t", "h.w", "h.h"}
+	macced := []string{"mac.inner.v", "mac.inner.t", "mac.inner.w", "mac.outer.v", "mac.outer.t", "mac.outer.w"}
+	cases := []struct {
+		name     string
+		want     error
+		panics   bool
+		populate []string
+		run      func(*keychainfake.Store, *Signer) error
+	}{
+		{"ecdsa-signed", nil, false, append(slices.Clone(macced), "vs"), func(st *keychainfake.Store, s *Signer) error {
+			_, err := s.SignECDSA("grant-a", "r", h[:])
+			return err
+		}},
+		{"schnorr-signed", nil, false, hashed, func(st *keychainfake.Store, s *Signer) error {
+			_, err := s.SignSchnorr("grant-a", "r", h[:])
+			return err
+		}},
+		{"schnorr-verify-refused", ErrSignature, false, hashed, func(st *keychainfake.Store, s *Signer) error {
+			fault := readerFunc(func(p []byte) (int, error) {
+				var one btcec.ModNScalar
+				one.SetInt(1)
+				seen[len(seen)-1].d.Add(&one)
+				clear(p)
+				return len(p), nil
+			})
+			_, err := NewWithStore(st, fault).SignSchnorr("grant-a", "r", h[:])
+			return err
+		}},
+		{"ecdsa-verify-refused", ErrSignature, false, append(slices.Clone(macced), "vs"), func(st *keychainfake.Store, s *Signer) error {
+			_, err := s.withKey("grant-a", "r", func(sc *scratch, _ *btcec.PublicKey) ([]byte, error) {
+				return signECDSA(sc, foreign, h[:])
+			})
+			return err
+		}},
+		{"panic-after-signing", nil, true, append(append(slices.Clone(macced), hashed...), "vs"), func(st *keychainfake.Store, s *Signer) error {
+			_, err := s.withKey("grant-a", "r", func(sc *scratch, pub *btcec.PublicKey) ([]byte, error) {
+				_, e1 := signECDSA(sc, pub, h[:])
+				_, e2 := signSchnorr(sc, pub, h[:])
+				panic(errors.Join(errors.New("injected after signing"), e1, e2))
+			})
+			return err
+		}},
+		{"schnorr-auth-canceled", keychain.ErrCanceled, false, nil, func(st *keychainfake.Store, s *Signer) error {
+			st.SecretErr = keychain.ErrCanceled
+			_, err := s.SignSchnorr("grant-a", "r", h[:])
+			return err
+		}},
+		{"schnorr-aux-entropy-fails", keychain.ErrStore, false, nil, func(st *keychainfake.Store, s *Signer) error {
+			_, err := NewWithStore(st, failingReader{}).SignSchnorr("grant-a", "r", h[:])
+			return err
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store := keychainfake.New()
+			s := NewWithStore(store, &countingReader{data: mustHex(t, vectors[1].secret)})
+			if _, err := s.Keygen("grant-a"); err != nil {
+				t.Fatal(err)
+			}
+			seen, used = nil, nil
+			var err error
+			panicked := func() (p bool) {
+				defer func() { p = recover() != nil }()
+				err = c.run(store, s)
+				return false
+			}()
+			if panicked != c.panics || (!c.panics && !errors.Is(err, c.want)) {
+				t.Fatalf("got err %v panicked %v, want %v panicked %v", err, panicked, c.want, c.panics)
+			}
+			if len(seen) == 0 {
+				t.Fatal("no scratch observed")
+			}
+			for _, name := range c.populate {
+				if !slices.Contains(used, name) {
+					t.Errorf("%s not populated in the scratch before the wipe: the zero check on it is vacuous, or the value lives outside the scratch", name)
+				}
+			}
+			for _, sc := range seen {
+				if left := workingValues(sc); len(left) != 0 {
+					t.Fatalf("owned working values survive the return: %v", left)
+				}
+			}
+		})
+	}
+}
+
+// secretPathLocals are the only named locals allowed in the package's
+// functions that compute over secret-derived words, each public: a byte
+// count, a loop index, the message bit length, and the library's parsed
+// signature (the curve library's own copy, docs/KEYCHAIN.md "Residual
+// memory") with its parse error.
+var secretPathLocals = map[string][]string{
+	"sha256.go:hashState.reset":       nil,
+	"sha256.go:hashState.write":       {"n"},
+	"sha256.go:hashState.block":       {"i", "i", "i", "i"},
+	"sha256.go:hashState.sum":         {"length", "lb", "i"},
+	"sha256.go:hashState.tagged":      nil,
+	"sha256.go:hmacState.start":       {"i", "i"},
+	"sha256.go:hmacState.finish":      nil,
+	"keysign.go:scratch.lowSVerifies": {"sig", "err"},
+}
+
+// Claim: the SHA-256, HMAC and ECDSA-verifier functions that compute over
+// secret-derived words declare no named local variable except the listed
+// public ones, so every secret-bearing word they name is a field of the
+// wiped scratch. A reintroduced local (for example "a, b, ... := d.h[0],
+// ..." in block, "for i, v := range d.h" in sum, or "s := sig.S()" in
+// lowSVerifies) fails here even where no runtime observation can see it.
+// Limit: source level only; it says nothing about registers or unnamed
+// compiler temporaries.
+func TestHashCodeHasNoSecretLocals(t *testing.T) {
+	got := map[string][]string{}
+	fset := token.NewFileSet()
+	for _, file := range []string{"sha256.go", "keysign.go"} {
+		f, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || fn.Body == nil {
+				continue
+			}
+			recv := fn.Recv.List[0].Type
+			if star, ok := recv.(*ast.StarExpr); ok {
+				recv = star.X
+			}
+			key := file + ":" + recv.(*ast.Ident).Name + "." + fn.Name.Name
+			if _, tracked := secretPathLocals[key]; !tracked {
+				continue
+			}
+			names := []string{}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.AssignStmt:
+					if n.Tok == token.DEFINE {
+						for _, l := range n.Lhs {
+							names = append(names, l.(*ast.Ident).Name)
+						}
+					}
+				case *ast.RangeStmt:
+					if n.Tok == token.DEFINE {
+						for _, l := range []ast.Expr{n.Key, n.Value} {
+							if l != nil {
+								names = append(names, l.(*ast.Ident).Name)
+							}
+						}
+					}
+				case *ast.ValueSpec:
+					for _, l := range n.Names {
+						names = append(names, l.Name)
+					}
+				case *ast.FuncLit:
+					names = append(names, "<func literal>")
+				}
+				return true
+			})
+			got[key] = names
+		}
+	}
+	for key, want := range secretPathLocals {
+		names, ok := got[key]
+		if !ok {
+			t.Errorf("%s not found", key)
+			continue
+		}
+		if !slices.Equal(names, append([]string{}, want...)) {
+			t.Errorf("%s declares locals %v, want only %v", key, names, want)
 		}
 	}
 }
