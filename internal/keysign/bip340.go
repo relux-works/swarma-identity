@@ -2,14 +2,14 @@ package keysign
 
 import (
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 )
 
 // schnorr is BIP-340 signing (the "Default Signing" algorithm) of msg with
 // the key loaded into sc (loadKey) and the auxiliary randomness in sc.aux.
-// Every secret it derives is written into sc. The caller verifies the result
-// with the library before it leaves the package.
-func (sc *scratch) schnorr(msg []byte) ([]byte, error) {
+// Every secret it derives is written into sc, and the signature into
+// sc.out[:64]. The caller verifies sc.out with the library and copies it out
+// only if it verifies.
+func (sc *scratch) schnorr(msg []byte) error {
 	// d = d' if has_even_y(P), otherwise n - d'.
 	if sc.P.Y.IsOdd() {
 		sc.d.Negate()
@@ -33,7 +33,7 @@ func (sc *scratch) schnorr(msg []byte) ([]byte, error) {
 	// k' = int(rand) mod n; fail if k' = 0.
 	sc.k.SetBytes(&sc.rand)
 	if sc.k.IsZero() {
-		return nil, ErrSignature
+		return ErrSignature
 	}
 	// R = k'*G; k = k' if has_even_y(R), otherwise n - k'.
 	sc.mulG(&sc.k, &sc.R)
@@ -52,11 +52,10 @@ func (sc *scratch) schnorr(msg []byte) ([]byte, error) {
 	var e btcec.ModNScalar
 	e.SetBytes(&eb)
 	// sig = bytes(R) || bytes((k + e*d) mod n).
-	sig := make([]byte, 64)
-	copy(sig, rx[:])
+	copy(sc.out[:32], rx[:])
 	sc.mix.Mul2(&e, &sc.d).Add(&sc.k)
-	sc.mix.PutBytesUnchecked(sig[32:])
-	return sig, nil
+	sc.mix.PutBytesUnchecked(sc.out[32:64])
+	return nil
 }
 
 // drbgMAC sets out = HMAC_K(V || sep || seed), omitting sep and seed when
@@ -114,9 +113,11 @@ func (sc *scratch) retryNonce() {
 // ecdsaSign is RFC 6979 deterministic ECDSA over the 32-byte hash with the
 // key loaded into sc, with the low-S rule (BIP 62/146): (r, s) with
 // r = (k*G).x mod n and s = k^-1 * (e + r*d) mod n, s negated when above n/2.
-// It returns strict DER.
-func (sc *scratch) ecdsaSign(hash *[32]byte) []byte {
-	var e, r, s btcec.ModNScalar
+// s is held in sc.s; the strict DER encoding is written to sc.out and its
+// length returned. The caller verifies sc.out with the library and copies it
+// out only if it verifies.
+func (sc *scratch) ecdsaSign(hash *[32]byte) int {
+	var e, r btcec.ModNScalar // the hash and R.x mod n, both public
 	e.SetBytes(hash)
 	sc.nonceRFC6979(hash)
 	for {
@@ -132,15 +133,43 @@ func (sc *scratch) ecdsaSign(hash *[32]byte) []byte {
 		}
 		invert(&sc.kinv, &sc.k)
 		sc.mix.Mul2(&sc.d, &r).Add(&e)
-		s.Mul2(&sc.mix, &sc.kinv)
-		if s.IsZero() {
+		sc.s.Mul2(&sc.mix, &sc.kinv)
+		if sc.s.IsZero() {
 			sc.retryNonce()
 			sc.nextNonce()
 			continue
 		}
-		if s.IsOverHalfOrder() {
-			s.Negate()
+		if sc.s.IsOverHalfOrder() {
+			sc.s.Negate()
 		}
-		return ecdsa.NewSignature(&r, &s).Serialize()
+		return sc.putDER(&r)
 	}
+}
+
+// putDER writes the strict DER encoding (BIP 66) of (r, sc.s), both non-zero,
+// into sc.out and returns its length. Each integer is written as a zero byte
+// and its 32 big-endian bytes, then shortened to its minimal form: a leading
+// zero byte is dropped while the byte after it has the high bit clear. The
+// library's Signature.Serialize is not used because it copies s into its
+// own locals; TestDERMatchesLibrary pins this encoding to it.
+func (sc *scratch) putDER(r *btcec.ModNScalar) int {
+	n := 2
+	for _, v := range [2]*btcec.ModNScalar{r, &sc.s} {
+		start := n + 2
+		sc.out[start] = 0
+		v.PutBytesUnchecked(sc.out[start+1 : start+33])
+		lead := 0
+		for lead < 32 && sc.out[start+lead] == 0 && sc.out[start+lead+1] < 0x80 {
+			lead++
+		}
+		size := 33 - lead
+		copy(sc.out[start:], sc.out[start+lead:start+33])
+		clear(sc.out[start+size : start+33])
+		sc.out[n] = 0x02
+		sc.out[n+1] = byte(size)
+		n = start + size
+	}
+	sc.out[0] = 0x30
+	sc.out[1] = byte(n - 2)
+	return n
 }

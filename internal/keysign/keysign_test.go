@@ -97,7 +97,8 @@ func TestBIP340SigningVectors(t *testing.T) {
 		if len(msg) == 32 {
 			sig, err = signSchnorr(sc, pub, msg)
 		} else {
-			sig, err = sc.schnorr(msg)
+			err = sc.schnorr(msg)
+			sig = bytes.Clone(sc.out[:64])
 		}
 		sc.wipe()
 		if err != nil || hex.EncodeToString(sig) != strings.ToLower(p.Signature) {
@@ -109,10 +110,16 @@ func TestBIP340SigningVectors(t *testing.T) {
 		_, other := btcec.PrivKeyFromBytes(mustHex(t, vectors[(i+1)%4].secret))
 		sc = loaded(t, mustHex(t, v.secret))
 		copy(sc.aux[:], mustHex(t, v.aux))
-		if _, err := signSchnorr(sc, other, msg); !errors.Is(err, ErrSignature) {
+		if got, err := signSchnorr(sc, other, msg); got != nil || !errors.Is(err, ErrSignature) {
 			t.Fatalf("vector %d: signature for a foreign key not refused", i)
 		}
+		if hex.EncodeToString(sc.out[:64]) != strings.ToLower(p.Signature) {
+			t.Fatalf("vector %d: the refused signature is not where the wipe reaches", i)
+		}
 		sc.wipe()
+		if sc.out != [72]byte{} {
+			t.Fatalf("vector %d: refused signature survives the wipe", i)
+		}
 	}
 }
 
@@ -131,7 +138,8 @@ var rfc6979Vectors = []struct{ key, msg, nonce, sig string }{
 // nonce, and its ECDSA signer yields each published low-S DER signature
 // (vector 2 is the case where the raw S is above n/2), through the
 // production path that returns it only after library verification; the
-// same path refuses it for a different public key.
+// same path refuses it for a different public key, returns no bytes, and
+// leaves the refused DER and s only in the scratch, which the wipe clears.
 func TestRFC6979Vectors(t *testing.T) {
 	for i, v := range rfc6979Vectors {
 		hash := sha256.Sum256([]byte(v.msg))
@@ -151,10 +159,69 @@ func TestRFC6979Vectors(t *testing.T) {
 		}
 		_, other := btcec.PrivKeyFromBytes(mustHex(t, vectors[1].secret))
 		sc = loaded(t, mustHex(t, v.key))
-		if _, err := signECDSA(sc, other, hash[:]); !errors.Is(err, ErrSignature) {
+		if got, err := signECDSA(sc, other, hash[:]); got != nil || !errors.Is(err, ErrSignature) {
 			t.Fatalf("vector %d: signature for a foreign key not refused", i)
 		}
+		if hex.EncodeToString(sc.out[:len(v.sig)/2]) != v.sig || sc.s.IsZero() {
+			t.Fatalf("vector %d: the refused signature is not where the wipe reaches", i)
+		}
 		sc.wipe()
+		if sc.out != [72]byte{} || !sc.s.IsZero() {
+			t.Fatalf("vector %d: refused signature survives the wipe", i)
+		}
+	}
+}
+
+// Claim: putDER is byte-for-byte the library's strict DER (Signature.
+// Serialize) for (r, s) values chosen at every minimal-encoding boundary:
+// the high bit set (a zero byte is prepended), the high bit clear, one to
+// thirty-one leading zero bytes followed by a byte with the high bit set or
+// clear, the value 1 and n/2; plus 64 random low-S pairs. Each case also
+// checks the library parses the result strictly. Limit: s is always at most
+// n/2 here, as ecdsaSign guarantees before it calls putDER.
+func TestDERMatchesLibrary(t *testing.T) {
+	var vals [][32]byte
+	for _, top := range []byte{0x01, 0x7f, 0x80, 0xff} {
+		for lead := 0; lead < 32; lead++ {
+			var b [32]byte
+			b[lead] = top
+			for j := lead + 1; j < 32; j++ {
+				b[j] = byte(j * 37)
+			}
+			vals = append(vals, b)
+		}
+	}
+	var one [32]byte
+	one[31] = 1
+	halfOrder := mustHex(t, "7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0")
+	vals = append(vals, one, [32]byte(halfOrder))
+	for i := 0; i < 64; i++ {
+		var b [32]byte
+		rand.Read(b[:])
+		vals = append(vals, b)
+	}
+	for i, rb := range vals {
+		sb := vals[(i*7+3)%len(vals)]
+		var r, s btcec.ModNScalar
+		r.SetBytes(&rb)
+		s.SetBytes(&sb)
+		if s.IsOverHalfOrder() {
+			s.Negate()
+		}
+		if r.IsZero() || s.IsZero() {
+			continue
+		}
+		sc := newScratch()
+		sc.s = s
+		got := bytes.Clone(sc.out[:sc.putDER(&r)])
+		sc.wipe()
+		want := ecdsa.NewSignature(&r, &s).Serialize()
+		if !bytes.Equal(got, want) {
+			t.Fatalf("case %d: %x != %x", i, got, want)
+		}
+		if _, err := ecdsa.ParseDERSignature(got); err != nil {
+			t.Fatalf("case %d: not strict DER: %v", i, err)
+		}
 	}
 }
 
@@ -416,7 +483,7 @@ func (failingReader) Read([]byte) (int, error) { return 0, errors.New("no entrop
 // over the three operations), so the zero check is not vacuous. Limit: kb
 // and acc are cleared inside mulG itself; their in-use state is not
 // observed here. This is the package's own memory; library stack frames and
-// registers are outside it (docs/KEYCHAIN.md).
+// registers are outside it (docs/KEYCHAIN.md "Residual memory").
 func TestScratchClearedOnEveryReturn(t *testing.T) {
 	var seen []*scratch
 	used := map[string]bool{}

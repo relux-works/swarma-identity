@@ -56,6 +56,11 @@ static CFAllocatorRef sk_wiping_allocator(void) {
 // control, no biometry. Release builds compile none of this.
 static SecKeychainRef sk_test_kc = NULL;
 
+// sk_test_read_wiped records whether the last secret read's result bytes
+// were all zero after sk_release_read wiped them (1) or not observed (0).
+static int sk_test_read_wiped = 0;
+int sk_last_read_wiped(void) { return sk_test_read_wiped; }
+
 int sk_open(const char *path) {
 	SecKeychainRef kc = NULL;
 	if (SecKeychainOpen(path, &kc) != errSecSuccess || kc == NULL) return SK_STORE;
@@ -66,6 +71,27 @@ int sk_open(const char *path) {
 	return SK_OK;
 }
 #endif
+
+// sk_release_read wipes the bytes of a secret read's result, then releases
+// it. The result is this process's own +1 object (the Copy rule), whose bytes
+// the framework allocated on this process's heap when it decoded the reply.
+// CFDataGetBytePtr is declared const; the wipe writes through a cast because
+// the bytes would otherwise be freed with the secret in them. Any CFData
+// result is wiped, also one of an unexpected length.
+static void sk_release_read(CFTypeRef res) {
+	if (res == NULL) return;
+	if (CFGetTypeID(res) == CFDataGetTypeID()) {
+		volatile unsigned char *p = (volatile unsigned char *)CFDataGetBytePtr((CFDataRef)res);
+		size_t n = (size_t)CFDataGetLength((CFDataRef)res);
+		if (p != NULL) sk_wipe(p, n);
+#ifdef SK_TESTMODE
+		int zero = p != NULL && n > 0;
+		for (size_t i = 0; zero && i < n; i++) if (p[i] != 0) zero = 0;
+		sk_test_read_wiped = zero;
+#endif
+	}
+	CFRelease(res);
+}
 
 static CFMutableDictionaryRef sk_query(const char *label, int add) {
 	CFMutableDictionaryRef q = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
@@ -182,8 +208,12 @@ static int sk_create(const char *label, const unsigned char *secret, const unsig
 
 // sk_secret reads the secret into out32. Release: a new LAContext per call
 // with no reuse window, so every read is its own Touch ID evaluation; the
-// context is invalidated after the read.
+// context is invalidated after the read. The framework's result is wiped
+// before it is released on every return path (sk_release_read).
 static int sk_secret(const char *label, const char *reason, unsigned char *out32) {
+#ifdef SK_TESTMODE
+	sk_test_read_wiped = 0;
+#endif
 	@autoreleasepool {
 		CFMutableDictionaryRef q = sk_query(label, 0);
 		CFDictionarySetValue(q, kSecReturnData, kCFBooleanTrue);
@@ -202,10 +232,10 @@ static int sk_secret(const char *label, const char *reason, unsigned char *out32
 		CFRelease(q);
 		if (ctx != nil) { [ctx invalidate]; [ctx release]; }
 		int rc = sk_map(st);
-		if (rc != SK_OK) { if (res != NULL) CFRelease(res); return rc; }
-		if (res == NULL || CFGetTypeID(res) != CFDataGetTypeID() || CFDataGetLength((CFDataRef)res) != 32) { if (res != NULL) CFRelease(res); return SK_ITEM; }
+		if (rc != SK_OK) { sk_release_read(res); return rc; }
+		if (res == NULL || CFGetTypeID(res) != CFDataGetTypeID() || CFDataGetLength((CFDataRef)res) != 32) { sk_release_read(res); return SK_ITEM; }
 		memcpy(out32, CFDataGetBytePtr((CFDataRef)res), 32);
-		CFRelease(res);
+		sk_release_read(res);
 		return SK_OK;
 	}
 }

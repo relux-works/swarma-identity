@@ -15,3 +15,8 @@
 
   Choosing one is a decision for Ivan and the leads.
 - G1-K `keychain sign` takes a digest only together with the draft it binds to, so the landlord signs twice per grant (`contract_sha256`, then `grant_signing_hash`). Each signature asks for Touch ID separately.
+- G1-K signer memory hardening (tracked, not scheduled). The arithmetic temporaries inside the pinned curve library (secp256k1 v4.4.0 `DoubleNonConst`, `AddNonConst`, `ToAffine`, `FieldVal.Inverse` and `ModNScalar` locals) are not cleared. `docs/KEYCHAIN.md` "Residual memory" accepts them for the one-shot `swarma-keychain` process only. The options for closing it are:
+  1. Sign through libsecp256k1 via cgo, which clears its own secret intermediates with `secp256k1_memclear`. This adds a C dependency and its build and review.
+  2. Sign in the keyvault once it is qualified, so the key never enters this process.
+
+  It becomes required before `internal/keysign` is used in any long-running process. Choosing between the options is a decision for the leads.

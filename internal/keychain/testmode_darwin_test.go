@@ -20,7 +20,11 @@ const vectorSecret = "b7e151628aed2a6abf7158809cf4f3c762e7160f38b4da56a784d90451
 // stores the secret and the public key under the label, Public returns the
 // public key without the secret, Secret returns exactly the 32 stored bytes,
 // a second Create under the same label is KEY_EXISTS and leaves the item
-// unchanged, and an absent label is KEY_NOT_FOUND.
+// unchanged, and an absent label is KEY_NOT_FOUND. A successful Secret read
+// leaves the framework's result buffer all zero before it is released
+// (observed in C after the wipe); the absent read resets the observation.
+// Limit: this is the file keychain's result object; the data protection
+// keychain's is not reachable from CI.
 func TestTestKeychainRoundTrip(t *testing.T) {
 	s, err := Default()
 	if err != nil {
@@ -51,8 +55,14 @@ func TestTestKeychainRoundTrip(t *testing.T) {
 	if err := s.Secret(label, "test read", &read); err != nil || read != secret {
 		t.Fatalf("secret read: %v", err)
 	}
+	if !LastReadWiped() {
+		t.Fatal("the Keychain result buffer was released without being wiped")
+	}
 	if err := s.Secret(label+"-absent", "test read", &read); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("absent secret: %v", err)
+	}
+	if LastReadWiped() {
+		t.Fatal("wipe observation not reset by a read with no result")
 	}
 }
 

@@ -5,8 +5,9 @@
 // over btcec's scalar and point primitives) rather than through the
 // library's signers, because those keep copies of the key and nonce in
 // buffers they never clear. Every secret this package computes lives in one
-// scratch value that is wiped on every return path; docs/KEYCHAIN.md states
-// what the Go runtime still keeps outside it. Every signature is verified
+// scratch value that is wiped on every return path; docs/KEYCHAIN.md
+// "Residual memory" names what the curve library and the Go runtime still
+// keep outside it. Every signature is verified
 // with the library against the stored public key before it is returned.
 // Only the swarma-keychain binary links this package; swarma-identity never
 // does.
@@ -150,14 +151,14 @@ func (s *Signer) SignSchnorr(label, reason string, digest []byte) ([]byte, error
 	})
 }
 
-// signSchnorr signs with the key loaded in sc and returns the signature only
-// if the library's BIP-340 verification accepts it for pub.
+// signSchnorr signs with the key loaded in sc and returns a copy of the
+// signature only if the library's BIP-340 verification accepts it for pub. A
+// refused signature exists only in sc.out, which the caller's wipe clears.
 func signSchnorr(sc *scratch, pub *btcec.PublicKey, digest []byte) ([]byte, error) {
-	sig, err := sc.schnorr(digest)
-	if err != nil || !SchnorrVerifies(sig, digest, pub) {
+	if err := sc.schnorr(digest); err != nil || !SchnorrVerifies(sc.out[:64], digest, pub) {
 		return nil, ErrSignature
 	}
-	return sig, nil
+	return bytes.Clone(sc.out[:64]), nil
 }
 
 // SchnorrVerifies is the library's BIP-340 verification of a 64-byte
@@ -180,12 +181,15 @@ func (s *Signer) SignECDSA(label, reason string, hash []byte) ([]byte, error) {
 	})
 }
 
+// signECDSA signs with the key loaded in sc and returns a copy of the DER
+// signature only if it is low-S and the library's verification accepts it
+// for pub. A refused signature exists only in sc.out and sc.s.
 func signECDSA(sc *scratch, pub *btcec.PublicKey, hash []byte) ([]byte, error) {
-	der := sc.ecdsaSign((*[32]byte)(hash))
-	if !LowSVerifies(der, hash, pub) {
+	n := sc.ecdsaSign((*[32]byte)(hash))
+	if !LowSVerifies(sc.out[:n], hash, pub) {
 		return nil, ErrSignature
 	}
-	return der, nil
+	return bytes.Clone(sc.out[:n]), nil
 }
 
 // LowSVerifies parses strict DER, requires S <= n/2 and verifies.

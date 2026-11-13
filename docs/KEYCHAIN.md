@@ -34,14 +34,61 @@ It does not protect against:
 
 `internal/keysign` does not call the library signers. btcec v2.3.5's `schnorr.Sign` copies the private scalar and its bytes into locals it never clears, and the ECDSA path (`ecdsa.Sign` → RFC 6979 in dcrd secp256k1 v4.4.0) leaves the key in the HMAC input buffer and HMAC state and takes the nonce inverse through `math/big`. The package instead implements BIP-340 signing (with fresh 32-byte `aux_rand` from the OS CSPRNG per signature) and RFC 6979 low-S ECDSA itself, over btcec's `ModNScalar` and `JacobianPoint` primitives, and verifies every result with the library's `schnorr` / `ecdsa` verification before it leaves the package.
 
-Every secret-bearing value of one operation lives in one heap-allocated `scratch`: the 32 key bytes, the scalar and its bytes, `aux`, `t`, `rand`, the RFC 6979 seed and HMAC_DRBG `K`/`V`, the nonce and its inverse, the products that mix the key into `s`, the bytes and running sum of each `k·G` multiplication, the k·G and d·G points, and the SHA-256 and HMAC states that consume secret input. The scalar multiplication by G (double-and-add), the inverse (Fermat, `k^(n-2)`), SHA-256 and HMAC-SHA256 are implemented in the package so that their state is in that struct. The scratch is wiped by a `defer` placed right after it is allocated, so it is cleared on every return path. `TestScratchClearedOnEveryReturn` reads each scratch after the public call returned, on success and on every refusal path, and finds every field zero; it also checks that each field was in use before the wipe. The implementation is pinned to the library by all BIP-340 signing vectors (0..3, 15..18), btcec's RFC 6979 vectors, and a byte-for-byte comparison with `schnorr.Sign`/`ecdsa.Sign` on random inputs.
+Every secret-bearing value of one operation lives in one heap-allocated `scratch`: the 32 key bytes, the scalar and its bytes, `aux`, `t`, `rand`, the RFC 6979 seed and HMAC_DRBG `K`/`V`, the nonce and its inverse, the products that mix the key into `s`, the ECDSA `s`, the bytes and running sum of each `k·G` multiplication, the k·G and d·G points, the SHA-256 and HMAC states that consume secret input, and the signature bytes until they have verified. The scalar multiplication by G (double-and-add), the inverse (Fermat, `k^(n-2)`), SHA-256, HMAC-SHA256 and the DER encoding are implemented in the package so that their state is in that struct. A signature is built in the scratch, verified there, and copied out only if it verifies; a refused signature is never copied anywhere. The scratch is wiped by a `defer` placed right after it is allocated, so it is cleared on every return path.
 
-What this does not reach, stated as limits of Go:
-- **Library stack frames and registers.** The field and scalar arithmetic (`ModNScalar.Mul2`/`Square`/`Add`, `FieldVal` operations inside `AddNonConst`, `DoubleNonConst` and `ToAffine`) and the package's own SHA-256 round function work on intermediates in their own stack frames and in CPU registers. Go offers no way to clear another frame or the register file. These are arithmetic intermediates, not a whole copy of the key or the nonce, but they are derived from them and are left until the stack is reused.
-- **Stack copying.** When a goroutine's stack grows, the runtime copies it and frees the old one without zeroing it. The scratch is on the heap, so it is not copied; the intermediates above can be.
-- **The heap.** Go's collector does not move objects, so the scratch is not duplicated by the GC, and it is zero before it becomes garbage. Freed memory is not zeroed until reused.
+The values this tool owns, and where each is cleared:
+
+| Value | Held in | Cleared by |
+| --- | --- | --- |
+| key bytes read from the Keychain or drawn by keygen | `scratch.secret` (the Keychain read writes straight into it) | `clear` right after `loadKey` in `withKey`; `wipe` after `Create` in `Keygen`; the deferred `wipe` on every path |
+| the Keychain read result (`SecItemCopyMatching`'s CFData, our +1 object) | heap, allocated by the framework | `sk_release_read` overwrites its bytes before `CFRelease`, on every return path of `sk_secret` |
+| the secret handed to `SecItemAdd` | a malloc block wrapped by a CFData with a wiping allocator | overwritten when the CFData is freed (`sk_wipe_free`) |
+| d, bytes(d), aux, t, rand, RFC 6979 seed, K, V, k, k⁻¹, r·d+e / e·d, ECDSA s | `scratch` fields | deferred `wipe` |
+| bytes and running sum of each k·G / d·G | `scratch.kb`, `scratch.acc` | at the end of `mulG`, and by `wipe` |
+| SHA-256 / HMAC states that absorbed the key, `t`, or K | `scratch.h`, `scratch.mac` | deferred `wipe` |
+| the signature before it verifies (returned or refused) | `scratch.out` | deferred `wipe`; the caller receives a copy only after verification |
+
+`TestScratchClearedOnEveryReturn` reads each scratch after the public call returned, on success and on every refusal path, and finds every field zero; it also checks that each field was in use before the wipe. The BIP-340 and RFC 6979 vector tests check that a signature refused for a foreign key was in `scratch.out` (and `scratch.s`) and is zero after the wipe. On macOS CI, `TestTestKeychainRoundTrip` observes the Keychain read result all zero after `sk_release_read` wiped it. The implementation is pinned to the library by all BIP-340 signing vectors (0..3, 15..18), btcec's RFC 6979 vectors, a byte-for-byte comparison with `schnorr.Sign`/`ecdsa.Sign` on random inputs, and the DER encoding against `Signature.Serialize` at every minimal-encoding boundary.
+
+### Residual memory
+
+Temporaries inside the pinned curve library are **not** cleared, by decision. Clearing them would mean forking or reimplementing the field and group arithmetic, which this PR does not do. They are listed here precisely, with the reasoning that makes them an accepted limit, and a hardening option is tracked in `UNRESOLVED_QUESTIONS.md`.
+
+The library is `github.com/decred/dcrd/dcrec/secp256k1/v4` v4.4.0, reached through `btcec/v2` v2.3.5. The functions below receive secret-derived inputs from this package. They hold intermediates in multiword `FieldVal` (10×uint32) locals in their own frames and in registers, and never zero them:
+
+- **`DoubleNonConst`** (`curve.go:623`). It is called 256 times per multiplication in `mulG`, on an accumulator that is the scalar's leading bits times G. It runs `doubleGeneric` (`curve.go:570`; locals `a, b, c, d, e, f` declared at `:596`) or `doubleZ1EqualsOne` (`:516`; the same six locals at `:542`).
+- **`AddNonConst`** (`curve.go:473`), on the same accumulator in `mulG`, runs one of:
+  - `addZ1AndZ2EqualsOne` (`:174`; `h, i, j, r, v, negJ, neg2V, negX3` at `:213-214`)
+  - `addZ1EqualsZ2` (`:241`; `a, b, c, d, e, f, negX1, negY1, negE, negX3` at `:281-282`)
+  - `addZ2EqualsOne` (`:313`; `z1z1, u2, s2` at `:338`, `h, hh, i, j, r, rr, v, negX1, negY1, negX3` at `:361-362`)
+  - `addGeneric` (`:393`; `z1z1, z2z2, u1, u2, s1, s2` at `:417`, `h, i, j, r, rr, v, negU1, negS1, negX3` at `:443-444`)
+- **`JacobianPoint.ToAffine`** (`curve.go:135`; `zInv, tempZ` at `:140`). It is called on d·G and on k·G, whose Jacobian Z depends on the scalar. It calls **`FieldVal.Inverse`** (`field.go:1511`; `a, a2, a3, a6, a9, a11, a22, a44, a88, a176, a220, a223` at `:1553`).
+- The `FieldVal` primitives these call (`Mul`, `Mul2` at `field.go:832`, `Square`, `SquareVal`, `Add`, `Negate`, `Normalize`). Their 64-bit limb products (`m`, `t0`…) are held in registers and frame slots.
+- **`ModNScalar`** arithmetic on d, k, k⁻¹, r·d+e and s:
+  - `SetBytes` (`modnscalar.go:324`), `PutBytes` (`:429`) and `PutBytesUnchecked`
+  - `Add` (`:496`), `Mul2` (`:816`), `Mul` (`:977`), `Square` (`:1003`) and `Negate` (`:1052`)
+  - `reduce512` (`:653`), whose sixteen 64-bit product words are passed as parameters
+- Verification of a signature in `scratch.out`: `schnorr.ParseSignature`/`Signature.Verify`, `ecdsa.ParseDERSignature`/`Signature.Verify`. These copy the signature into library values (the parsed ECDSA signature is heap-allocated). A verified signature is public. A refused one is not released, but these copies of it are not cleared.
+
+Three neighbouring residuals are of the same kind:
+- **Registers and spill slots of this package's own functions.** Scalar locals (SHA-256 round variables, loop counters, limb values on their way into the scratch) live in registers. They may be spilled to the frame, and Go removes stores to dead locals, so source code cannot clear them. Built with Go 1.26.8, `(*hashState).block` has no stack locals on darwin/arm64 (`-gcflags=-S`: `locals=0x0`) and 16 bytes on amd64.
+- **Stack copying.** When a goroutine's stack grows, the runtime copies it and frees the old one without zeroing it. The scratch is on the heap and is never copied. The frames above can be. Go's collector does not move heap objects.
+- **Security.framework internals.** The framework handles the XPC request and reply buffers from which `SecItemAdd`'s input is encoded and `SecItemCopyMatching`'s result is decoded. This tool never receives a pointer to them.
+
+Why this is accepted:
+1. **The temporaries live only in short-lived frames of a one-shot process.** `swarma-keychain` signs inside one command invocation and exits as soon as it has written the single JSON envelope:
+   - `run` in `internal/facade/cli.go` writes the envelope with one `Encode` to the unbuffered `os.Stdout`, then returns its exit code.
+   - `main` in `cmd/swarma-keychain/main.go` passes that code straight to `os.Exit`. There are no deferred calls, no signal teardown and no further allocation.
+
+   Between the last signature and the exit, the only work is verifying, hex-encoding and writing public data. No reference to a scratch remains after `withKey` returns. The process's memory then goes back to the kernel, which zero-fills pages before handing them to any process.
+2. **Clearing them would not change the threat model.** While a signature is being made, the decrypted key is in this process's memory: the key bytes until `loadKey` returns, and the scalar d in the scratch for the whole operation. An attacker who can read this process's memory during signing can therefore read the key itself at that moment, so clearing library stack temporaries would not deny them anything. An attacker who cannot read the process's memory gets nothing from the temporaries either, and after the exit they no longer exist.
+
+This argument depends on the process being one-shot. Any later use of `internal/keysign` in a long-running process (a daemon, an agent, a library linked into a server) invalidates it, and that use must first adopt the hardening option.
+
+**Tracked hardening option (not done here).** Sign through libsecp256k1 via cgo: `secp256k1_schnorrsig_sign32` and `secp256k1_ecdsa_sign` clear their own secret intermediates with `secp256k1_memclear`. Alternatively, move signing into the keyvault once it is qualified, so the key never enters this process. See `UNRESOLVED_QUESTIONS.md`.
+
+Other limits:
 - **Timing.** Like the btcec routines it replaces (`…NonConst`), the multiplication by G branches on the scalar's bits. The threat model above does not include a local timing attacker.
-- **The Keychain read.** The buffer passed to `SecItemAdd` is wiped when it is freed. The copy that Security.framework returns from a read is released without being overwritten, because the framework owns it; the Go copy made from it is the scratch's key bytes.
 
 ## Commands
 
@@ -161,7 +208,7 @@ Evidence so far, from hosted CI run 43322768154 on macOS 15: an ad-hoc-signed te
 
 | Where | What |
 | --- | --- |
-| any platform | all BIP-340 signing vectors (0..3, 15..18) and btcec's RFC 6979 vectors through the package's own signers; byte-for-byte agreement with the library signers on random inputs; the wipeable SHA-256/HMAC, k·G and inverse against the standard library and btcec; every scratch field zero after each signer call returns (success and refusal paths); ECDSA low-S against the high-S twin; duplicate inputs refused in both encodings; supplied prevouts that disagree with a full previous transaction refused; every sighash-committed field in the display; the legacy sighash against an independent implementation; keygen refusals; display before key read; refusal on decline; 12 digest-binding refusals; seal-spend refusals and a PSBT positive control; secret scan over all outputs and fds; value build vector and refusals; binary closure |
-| macOS CI, tag `keychaintest` | a throwaway file keychain made by `security create-keychain` in the job (never the login keychain): store round trip, duplicate label, path guard; keygen → sign → PR 8 `grant sign` end to end |
+| any platform | all BIP-340 signing vectors (0..3, 15..18) and btcec's RFC 6979 vectors through the package's own signers; byte-for-byte agreement with the library signers on random inputs; the DER encoder against the library's at every minimal-encoding boundary; the wipeable SHA-256/HMAC, k·G and inverse against the standard library and btcec; every scratch field zero after each signer call returns (success and refusal paths); a signature refused for a foreign key held only in the scratch and zero after the wipe; the binary exits with the result's code right after its one envelope; ECDSA low-S against the high-S twin; duplicate inputs refused in both encodings; supplied prevouts that disagree with a full previous transaction refused; every sighash-committed field in the display; the legacy sighash against an independent implementation; keygen refusals; display before key read; refusal on decline; 12 digest-binding refusals; seal-spend refusals and a PSBT positive control; secret scan over all outputs and fds; value build vector and refusals; binary closure |
+| macOS CI, tag `keychaintest` | a throwaway file keychain made by `security create-keychain` in the job (never the login keychain): store round trip, duplicate label, path guard; the Keychain read result wiped before release; keygen → sign → PR 8 `grant sign` end to end |
 | macOS CI, release build | release-store preflight refuses on the runner (no biometry); a read-only lookup of a random label returns no item |
 | CI Build step | release `swarma-keychain` and `swarma-identity` binaries do not contain the test keychain selector (positive control: the `keychaintest` build does) |

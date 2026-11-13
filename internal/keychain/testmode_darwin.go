@@ -7,6 +7,7 @@ package keychain
 #include <stdlib.h>
 int sk_open(const char *path);
 int sk_delete(const char *label);
+int sk_last_read_wiped(void);
 */
 import "C"
 
@@ -51,3 +52,8 @@ func Delete(label string) error {
 	defer C.free(unsafe.Pointer(cl))
 	return statusErr(C.sk_delete(cl))
 }
+
+// LastReadWiped reports whether the result buffer of the last Secret call
+// was observed all zero after it was wiped and before it was released. Only
+// the keychaintest build has it.
+func LastReadWiped() bool { return C.sk_last_read_wiped() == 1 }
