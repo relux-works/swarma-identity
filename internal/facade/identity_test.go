@@ -17,20 +17,23 @@ import (
 	"testing"
 )
 
-// Public keys and values copied byte-for-byte from mainnet name_show output
-// (tip 851209). They are independent of the chain-lab builders.
+// Public keys and mainnet* values copied byte-for-byte from name_show output
+// (tip 851209), independently of the chain-lab builders. The raw agent value
+// retains its on-chain reference; derived fixtures use a neutral namespace.
 const (
-	ivanSocial = "a6b79d4e39e783da7cc0f0c19f462c1a1c099699cdbe204c0f1db97c6ef7b438"
-	ivanGrant  = "18fe8d331d945e77dd10bb695afaa0e5475f818880c8c03768b4db02a55dc891"
-	cedarKey   = "ff59fe00359f3cb69d1013714d7e62aa029202080ea107c09afb91070c7b00bf"
+	mainnetSocialKey = "a6b79d4e39e783da7cc0f0c19f462c1a1c099699cdbe204c0f1db97c6ef7b438"
+	mainnetGrantKey  = "18fe8d331d945e77dd10bb695afaa0e5475f818880c8c03768b4db02a55dc891"
+	cedarKey         = "ff59fe00359f3cb69d1013714d7e62aa029202080ea107c09afb91070c7b00bf"
 
-	mainnetLandlord = `{"nostr":{"names":{"_":"` + ivanSocial + `"}},"swarma":{"landlord":{"grant":"` + ivanGrant + `"}}}`
+	mainnetLandlord = `{"nostr":{"names":{"_":"` + mainnetSocialKey + `"}},"swarma":{"landlord":{"grant":"` + mainnetGrantKey + `"}}}`
 	mainnetAgent    = `{"nostr":{"names":{"_":"` + cedarKey + `"}},"swarma":{"agent":{"nostr":"` + cedarKey + `","landlord":"id/ivanopcode"}}}`
-	mainnetSwarma   = `{"nostr":{"names":{"_":"` + ivanSocial + `"}}}`
+	mainnetSwarma   = `{"nostr":{"names":{"_":"` + mainnetSocialKey + `"}}}`
 
-	plainLandlord = `{"swarma":{"landlord":{"grant":"` + ivanGrant + `"}}}`
-	plainAgent    = `{"swarma":{"agent":{"nostr":"` + cedarKey + `","landlord":"id/ivanopcode"}}}`
-	relayLandlord = `{"nostr":{"names":{"_":"` + ivanSocial + `"},"relays":{"` + ivanSocial + `":["wss://relay.example","wss://relay2.example"]}},"swarma":{"landlord":{"grant":"` + ivanGrant + `"}}}`
+	fixtureAgent = `{"nostr":{"names":{"_":"` + cedarKey + `"}},"swarma":{"agent":{"nostr":"` + cedarKey + `","landlord":"id/example-owner"}}}`
+
+	plainLandlord = `{"swarma":{"landlord":{"grant":"` + mainnetGrantKey + `"}}}`
+	plainAgent    = `{"swarma":{"agent":{"nostr":"` + cedarKey + `","landlord":"id/example-owner"}}}`
+	relayLandlord = `{"nostr":{"names":{"_":"` + mainnetSocialKey + `"},"relays":{"` + mainnetSocialKey + `":["wss://relay.example","wss://relay2.example"]}},"swarma":{"landlord":{"grant":"` + mainnetGrantKey + `"}}}`
 )
 
 type idRecord struct {
@@ -137,11 +140,11 @@ func identityFixture(t *testing.T, sc idScenario) (*Client, func() ([]string, []
 	}
 }
 
-func mainnetRecords() map[string]idRecord {
+func fixtureRecords() map[string]idRecord {
 	return map[string]idRecord{
-		"id/ivanopcode":       activeRecord(mainnetLandlord),
-		"id/ivanopcode-cedar": activeRecord(mainnetAgent),
-		"id/swarma":           activeRecord(mainnetSwarma),
+		"id/example-owner":       activeRecord(mainnetLandlord),
+		"id/example-owner-cedar": activeRecord(fixtureAgent),
+		"id/swarma":              activeRecord(mainnetSwarma),
 	}
 }
 
@@ -161,7 +164,7 @@ func TestClassifyV3(t *testing.T) {
 			urls = append(urls, "wss://r"+strconv.Itoa(i)+".example")
 		}
 		b, _ := json.Marshal(urls)
-		return `{"nostr":{"names":{"_":"` + ivanSocial + `"},"relays":{"` + ivanSocial + `":` + string(b) + `}},"swarma":{"landlord":{"grant":"` + ivanGrant + `"}}}`, urls
+		return `{"nostr":{"names":{"_":"` + mainnetSocialKey + `"},"relays":{"` + mainnetSocialKey + `":` + string(b) + `}},"swarma":{"landlord":{"grant":"` + mainnetGrantKey + `"}}}`, urls
 	}
 	n := 1
 	for v, _ := relayValue(n + 1); len(v) <= 520; v, _ = relayValue(n + 1) {
@@ -173,23 +176,24 @@ func TestClassifyV3(t *testing.T) {
 		name, value string
 		want        v3Value
 	}{
-		{"mainnet-landlord", mainnetLandlord, v3Value{role: "landlord", grantKey: ivanGrant, social: &Social{Key: ivanSocial, Relays: []string{}}}},
-		{"plain-landlord", plainLandlord, v3Value{role: "landlord", grantKey: ivanGrant}},
-		{"relay-landlord", relayLandlord, v3Value{role: "landlord", grantKey: ivanGrant, social: &Social{Key: ivanSocial, Relays: []string{"wss://relay.example", "wss://relay2.example"}}}},
-		{"mainnet-agent", mainnetAgent, v3Value{role: "agent", nostrKey: cedarKey, landlord: "id/ivanopcode", social: &Social{Key: cedarKey, Relays: []string{}}}},
-		{"plain-agent", plainAgent, v3Value{role: "agent", nostrKey: cedarKey, landlord: "id/ivanopcode"}},
+		{"mainnet-landlord", mainnetLandlord, v3Value{role: "landlord", grantKey: mainnetGrantKey, social: &Social{Key: mainnetSocialKey, Relays: []string{}}}},
+		{"plain-landlord", plainLandlord, v3Value{role: "landlord", grantKey: mainnetGrantKey}},
+		{"relay-landlord", relayLandlord, v3Value{role: "landlord", grantKey: mainnetGrantKey, social: &Social{Key: mainnetSocialKey, Relays: []string{"wss://relay.example", "wss://relay2.example"}}}},
+		{"mainnet-agent", mainnetAgent, v3Value{role: "agent", nostrKey: cedarKey, landlord: publishedAgentLandlord(t), social: &Social{Key: cedarKey, Relays: []string{}}}},
+		{"fixture-agent", fixtureAgent, v3Value{role: "agent", nostrKey: cedarKey, landlord: "id/example-owner", social: &Social{Key: cedarKey, Relays: []string{}}}},
+		{"plain-agent", plainAgent, v3Value{role: "agent", nostrKey: cedarKey, landlord: "id/example-owner"}},
 		{"id-swarma-shape", mainnetSwarma, v3Value{role: "none"}},
-		{"whitespace", `{"swarma": {"landlord":{"grant":"` + ivanGrant + `"}}}`, v3Value{role: "none"}},
-		{"reordered", `{"swarma":{"landlord":{"grant":"` + ivanGrant + `"}},"nostr":{"names":{"_":"` + ivanSocial + `"}}}`, v3Value{role: "none"}},
-		{"extra-member", `{"swarma":{"landlord":{"grant":"` + ivanGrant + `","x":1}}}`, v3Value{role: "none"}},
-		{"uppercase-key", `{"swarma":{"landlord":{"grant":"` + strings.ToUpper(ivanGrant) + `"}}}`, v3Value{role: "none"}},
+		{"whitespace", `{"swarma": {"landlord":{"grant":"` + mainnetGrantKey + `"}}}`, v3Value{role: "none"}},
+		{"reordered", `{"swarma":{"landlord":{"grant":"` + mainnetGrantKey + `"}},"nostr":{"names":{"_":"` + mainnetSocialKey + `"}}}`, v3Value{role: "none"}},
+		{"extra-member", `{"swarma":{"landlord":{"grant":"` + mainnetGrantKey + `","x":1}}}`, v3Value{role: "none"}},
+		{"uppercase-key", `{"swarma":{"landlord":{"grant":"` + strings.ToUpper(mainnetGrantKey) + `"}}}`, v3Value{role: "none"}},
 		{"off-curve-key", `{"swarma":{"landlord":{"grant":"` + strings.Repeat("f", 64) + `"}}}`, v3Value{role: "none"}},
-		{"both-roles", `{"swarma":{"landlord":{"grant":"` + ivanGrant + `"},"agent":{"nostr":"` + cedarKey + `","landlord":"id/ivanopcode"}}}`, v3Value{role: "none"}},
-		{"agent-root-mismatch", `{"nostr":{"names":{"_":"` + ivanSocial + `"}},"swarma":{"agent":{"nostr":"` + cedarKey + `","landlord":"id/ivanopcode"}}}`, v3Value{role: "none"}},
-		{"agent-non-id-landlord", `{"swarma":{"agent":{"nostr":"` + cedarKey + `","landlord":"d/ivanopcode"}}}`, v3Value{role: "none"}},
-		{"agent-uppercase-landlord", `{"swarma":{"agent":{"nostr":"` + cedarKey + `","landlord":"id/Ivan"}}}`, v3Value{role: "none"}},
-		{"relay-http", `{"nostr":{"names":{"_":"` + ivanSocial + `"},"relays":{"` + ivanSocial + `":["http://relay.example"]}},"swarma":{"landlord":{"grant":"` + ivanGrant + `"}}}`, v3Value{role: "none"}},
-		{"fits-520", fit, v3Value{role: "landlord", grantKey: ivanGrant, social: &Social{Key: ivanSocial, Relays: fitURLs}}},
+		{"both-roles", `{"swarma":{"landlord":{"grant":"` + mainnetGrantKey + `"},"agent":{"nostr":"` + cedarKey + `","landlord":"id/example-owner"}}}`, v3Value{role: "none"}},
+		{"agent-root-mismatch", `{"nostr":{"names":{"_":"` + mainnetSocialKey + `"}},"swarma":{"agent":{"nostr":"` + cedarKey + `","landlord":"id/example-owner"}}}`, v3Value{role: "none"}},
+		{"agent-non-id-landlord", `{"swarma":{"agent":{"nostr":"` + cedarKey + `","landlord":"d/example-owner"}}}`, v3Value{role: "none"}},
+		{"agent-uppercase-landlord", `{"swarma":{"agent":{"nostr":"` + cedarKey + `","landlord":"id/Example"}}}`, v3Value{role: "none"}},
+		{"relay-http", `{"nostr":{"names":{"_":"` + mainnetSocialKey + `"},"relays":{"` + mainnetSocialKey + `":["http://relay.example"]}},"swarma":{"landlord":{"grant":"` + mainnetGrantKey + `"}}}`, v3Value{role: "none"}},
+		{"fits-520", fit, v3Value{role: "landlord", grantKey: mainnetGrantKey, social: &Social{Key: mainnetSocialKey, Relays: fitURLs}}},
 		{"over-520", long, v3Value{role: "none"}},
 		{"invalid-utf8", "\xff\x00{}", v3Value{role: "none"}},
 		{"empty", "", v3Value{role: "none"}},
@@ -226,19 +230,20 @@ func showResult(t *testing.T, c *Client, name string) (*IdentityResult, map[stri
 
 func keysOf(m map[string]any) []string { return slices.Sorted(maps.Keys(m)) }
 
-// Claim: id/ivanopcode's mainnet value is shown as a landlord with both keys,
+// Claim: the published landlord value served under a neutral fixture name
+// is shown as a landlord with both keys,
 // exact value bytes and the observed tip, using one name read in one snapshot.
 func TestIdentityShowLandlord(t *testing.T) {
-	c, observed := identityFixture(t, idScenario{records: mainnetRecords()})
-	r, m := showResult(t, c, "id/ivanopcode")
-	if r.Role != "landlord" || r.GrantKey != ivanGrant || r.Social == nil || r.Social.Key != ivanSocial || r.Reason != "" || r.ValueHex != hexOf(mainnetLandlord) || r.Height != 90 || r.ExpiresIn != 35000 || r.ObservedTip != (Tip{fixtureTip, 100}) {
+	c, observed := identityFixture(t, idScenario{records: fixtureRecords()})
+	r, m := showResult(t, c, "id/example-owner")
+	if r.Role != "landlord" || r.GrantKey != mainnetGrantKey || r.Social == nil || r.Social.Key != mainnetSocialKey || r.Reason != "" || r.ValueHex != hexOf(mainnetLandlord) || r.Height != 90 || r.ExpiresIn != 35000 || r.ObservedTip != (Tip{fixtureTip, 100}) {
 		t.Fatalf("landlord projection differs: %#v", r)
 	}
 	if got := keysOf(m); !reflect.DeepEqual(got, []string{"expires_in", "grant_key", "height", "name", "observed_tip", "role", "social", "txid", "value_hex", "vout"}) {
 		t.Fatalf("landlord members = %v", got)
 	}
 	methods, names := observed()
-	if !reflect.DeepEqual(methods, calls("name_show", "getbestblockhash")) || !reflect.DeepEqual(names, []string{"id/ivanopcode"}) {
+	if !reflect.DeepEqual(methods, calls("name_show", "getbestblockhash")) || !reflect.DeepEqual(names, []string{"id/example-owner"}) {
 		t.Fatalf("landlord reads = %v %v", methods, names)
 	}
 }
@@ -246,17 +251,17 @@ func TestIdentityShowLandlord(t *testing.T) {
 // Claim: an agent is shown with its key and pointer, and its landlord is resolved
 // by a second name read inside the same tip snapshot.
 func TestIdentityShowAgent(t *testing.T) {
-	c, observed := identityFixture(t, idScenario{records: mainnetRecords()})
-	r, m := showResult(t, c, "id/ivanopcode-cedar")
-	want := &ResolvedLandlord{Name: "id/ivanopcode", GrantKey: ivanGrant, Social: &Social{Key: ivanSocial, Relays: []string{}}, ValueHex: hexOf(mainnetLandlord), TxID: strings.Repeat("3", 64), Height: 90, ExpiresIn: 35000}
-	if r.Role != "agent" || r.NostrKey != cedarKey || r.Landlord != "id/ivanopcode" || r.Reason != "" || r.Social == nil || r.Social.Key != cedarKey || r.GrantKey != "" || !reflect.DeepEqual(r.LandlordResolved, want) || r.ValueHex != hexOf(mainnetAgent) {
+	c, observed := identityFixture(t, idScenario{records: fixtureRecords()})
+	r, m := showResult(t, c, "id/example-owner-cedar")
+	want := &ResolvedLandlord{Name: "id/example-owner", GrantKey: mainnetGrantKey, Social: &Social{Key: mainnetSocialKey, Relays: []string{}}, ValueHex: hexOf(mainnetLandlord), TxID: strings.Repeat("3", 64), Height: 90, ExpiresIn: 35000}
+	if r.Role != "agent" || r.NostrKey != cedarKey || r.Landlord != "id/example-owner" || r.Reason != "" || r.Social == nil || r.Social.Key != cedarKey || r.GrantKey != "" || !reflect.DeepEqual(r.LandlordResolved, want) || r.ValueHex != hexOf(fixtureAgent) {
 		t.Fatalf("agent projection differs: %#v", r)
 	}
 	if got := keysOf(m); !reflect.DeepEqual(got, []string{"expires_in", "height", "landlord", "landlord_resolved", "name", "nostr_key", "observed_tip", "role", "social", "txid", "value_hex", "vout"}) {
 		t.Fatalf("agent members = %v", got)
 	}
 	methods, names := observed()
-	if !reflect.DeepEqual(methods, calls("name_show", "name_show", "getbestblockhash")) || !reflect.DeepEqual(names, []string{"id/ivanopcode-cedar", "id/ivanopcode"}) {
+	if !reflect.DeepEqual(methods, calls("name_show", "name_show", "getbestblockhash")) || !reflect.DeepEqual(names, []string{"id/example-owner-cedar", "id/example-owner"}) {
 		t.Fatalf("agent reads = %v %v", methods, names)
 	}
 }
@@ -264,7 +269,7 @@ func TestIdentityShowAgent(t *testing.T) {
 // Claim: the id/swarma value shape is a successful observation with role
 // "none", reason VALUE_NOT_V3, no key members and no further name read.
 func TestIdentityShowValueNotV3(t *testing.T) {
-	c, observed := identityFixture(t, idScenario{records: mainnetRecords()})
+	c, observed := identityFixture(t, idScenario{records: fixtureRecords()})
 	r, m := showResult(t, c, "id/swarma")
 	if r.Role != "none" || r.Reason != ReasonValueNotV3 || r.ValueHex != hexOf(mainnetSwarma) {
 		t.Fatalf("non-v3 projection differs: %#v", r)
@@ -291,7 +296,7 @@ func TestIdentityShowLandlordNotV3(t *testing.T) {
 		target        idRecord
 		ok            bool
 	}{
-		{"valid-landlord", "id/ivanopcode", activeRecord(plainLandlord), true},
+		{"valid-landlord", "id/example-owner", activeRecord(plainLandlord), true},
 		{"swarma-shape", "id/target", activeRecord(mainnetSwarma), false},
 		{"another-agent", "id/target", activeRecord(plainAgent), false},
 		{"expired-landlord", "id/target", expired, false},
@@ -310,7 +315,7 @@ func TestIdentityShowLandlordNotV3(t *testing.T) {
 				t.Fatalf("agent fields lost: %#v", r)
 			}
 			if tc.ok {
-				if r.Reason != "" || r.LandlordResolved == nil || r.LandlordResolved.GrantKey != ivanGrant {
+				if r.Reason != "" || r.LandlordResolved == nil || r.LandlordResolved.GrantKey != mainnetGrantKey {
 					t.Fatalf("valid landlord control refused: %#v", r)
 				}
 			} else if r.Reason != ReasonLandlordNotV3 || r.LandlordResolved != nil {
@@ -334,15 +339,15 @@ func TestIdentityShowSnapshotChanged(t *testing.T) {
 		moved        Tip
 		code         string
 	}{
-		{"agent-unmoved", "id/ivanopcode-cedar", 0, Tip{}, ""},
-		{"landlord-target-advanced", "id/ivanopcode", 1, Tip{other, 101}, "SNAPSHOT_CHANGED"},
-		{"agent-target-reorg-same-height", "id/ivanopcode-cedar", 1, Tip{other, 100}, "SNAPSHOT_CHANGED"},
-		{"agent-landlord-read-advanced", "id/ivanopcode-cedar", 2, Tip{other, 101}, "SNAPSHOT_CHANGED"},
+		{"agent-unmoved", "id/example-owner-cedar", 0, Tip{}, ""},
+		{"landlord-target-advanced", "id/example-owner", 1, Tip{other, 101}, "SNAPSHOT_CHANGED"},
+		{"agent-target-reorg-same-height", "id/example-owner-cedar", 1, Tip{other, 100}, "SNAPSHOT_CHANGED"},
+		{"agent-landlord-read-advanced", "id/example-owner-cedar", 2, Tip{other, 101}, "SNAPSHOT_CHANGED"},
 		{"non-v3-advanced", "id/swarma", 1, Tip{other, 101}, "SNAPSHOT_CHANGED"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, observed := identityFixture(t, idScenario{records: mainnetRecords(), moveTipAt: tc.moveAt, movedTip: tc.moved})
+			c, observed := identityFixture(t, idScenario{records: fixtureRecords(), moveTipAt: tc.moveAt, movedTip: tc.moved})
 			r, f := c.Identity(context.Background(), tc.target)
 			if tc.code == "" {
 				if f != nil || r == nil {
@@ -374,8 +379,8 @@ func TestIdentityShowMalformedValue(t *testing.T) {
 		{"oversize-521", "id/agent", map[string]idRecord{"id/agent": {value: at520 + "ab", height: 90, expiresIn: 5}}, "PROVIDER_PROTOCOL"},
 		{"odd-hex", "id/agent", map[string]idRecord{"id/agent": {value: hexOf(plainLandlord) + "a", height: 90, expiresIn: 5}}, "PROVIDER_PROTOCOL"},
 		{"non-hex", "id/agent", map[string]idRecord{"id/agent": {value: "zz" + hexOf(plainLandlord), height: 90, expiresIn: 5}}, "PROVIDER_PROTOCOL"},
-		{"landlord-oversize", "id/ivanopcode-cedar", map[string]idRecord{"id/ivanopcode-cedar": activeRecord(mainnetAgent), "id/ivanopcode": {value: at520 + "ab", height: 90, expiresIn: 5}}, "PROVIDER_PROTOCOL"},
-		{"landlord-future-height", "id/ivanopcode-cedar", map[string]idRecord{"id/ivanopcode-cedar": activeRecord(mainnetAgent), "id/ivanopcode": {value: hexOf(plainLandlord), height: 101, expiresIn: 5}}, "PROVIDER_PROTOCOL"},
+		{"landlord-oversize", "id/example-owner-cedar", map[string]idRecord{"id/example-owner-cedar": activeRecord(fixtureAgent), "id/example-owner": {value: at520 + "ab", height: 90, expiresIn: 5}}, "PROVIDER_PROTOCOL"},
+		{"landlord-future-height", "id/example-owner-cedar", map[string]idRecord{"id/example-owner-cedar": activeRecord(fixtureAgent), "id/example-owner": {value: hexOf(plainLandlord), height: 101, expiresIn: 5}}, "PROVIDER_PROTOCOL"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -406,12 +411,12 @@ func TestIdentityShowRefusals(t *testing.T) {
 		code         string
 		exit         int
 	}{
-		{"missing-target", "id/absent", mainnetRecords(), "NAME_NOT_FOUND", 3},
+		{"missing-target", "id/absent", fixtureRecords(), "NAME_NOT_FOUND", 3},
 		{"expired-target", "id/old", map[string]idRecord{"id/old": expired}, "NAME_EXPIRED", 3},
-		{"landlord-read-refused", "id/ivanopcode-cedar", map[string]idRecord{"id/ivanopcode-cedar": activeRecord(mainnetAgent), "id/ivanopcode": {rpcCode: -1}}, "RPC_REFUSED", 3},
-		{"empty-name", "", mainnetRecords(), "BAD_INPUT", 2},
-		{"long-name", "id/" + strings.Repeat("a", 253), mainnetRecords(), "BAD_INPUT", 2},
-		{"invalid-utf8-name", "id/\xff", mainnetRecords(), "BAD_INPUT", 2},
+		{"landlord-read-refused", "id/example-owner-cedar", map[string]idRecord{"id/example-owner-cedar": activeRecord(fixtureAgent), "id/example-owner": {rpcCode: -1}}, "RPC_REFUSED", 3},
+		{"empty-name", "", fixtureRecords(), "BAD_INPUT", 2},
+		{"long-name", "id/" + strings.Repeat("a", 253), fixtureRecords(), "BAD_INPUT", 2},
+		{"invalid-utf8-name", "id/\xff", fixtureRecords(), "BAD_INPUT", 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -433,15 +438,15 @@ func TestIdentityShowRefusals(t *testing.T) {
 // and exit codes, refuses a malformed, extended or oversize request before the
 // config is opened, and never echoes the request name in a refusal.
 func TestCLIIdentityShow(t *testing.T) {
-	c, _ := identityFixture(t, idScenario{records: mainnetRecords(), moveTipAt: 4, movedTip: Tip{strings.Repeat("2", 64), 101}})
+	c, _ := identityFixture(t, idScenario{records: fixtureRecords(), moveTipAt: 4, movedTip: Tip{strings.Repeat("2", 64), 101}})
 	config := writeInput(t, c.config)
 	request := func(name string) string {
 		return writeInput(t, struct {
 			Name string `json:"name"`
 		}{name})
 	}
-	e, code, raw := runCLI(t, "identity", "show", "--config", config, "--request", request("id/ivanopcode"), "--json")
-	if code != 0 || e.Command != "identity show" || e.Network != "main" || !strings.Contains(string(raw), `"role":"landlord"`) || !strings.Contains(string(raw), `"grant_key":"`+ivanGrant+`"`) {
+	e, code, raw := runCLI(t, "identity", "show", "--config", config, "--request", request("id/example-owner"), "--json")
+	if code != 0 || e.Command != "identity show" || e.Network != "main" || !strings.Contains(string(raw), `"role":"landlord"`) || !strings.Contains(string(raw), `"grant_key":"`+mainnetGrantKey+`"`) {
 		t.Fatalf("landlord CLI result differs: %s", raw)
 	}
 	e, code, raw = runCLI(t, "identity", "show", "--config", config, "--request", request("id/swarma"), "--json")
@@ -449,7 +454,7 @@ func TestCLIIdentityShow(t *testing.T) {
 		t.Fatalf("non-v3 CLI result differs: %s", raw)
 	}
 	// The fixture's fourth name_show is the agent's landlord read in this run.
-	e, code, raw = runCLI(t, "identity", "show", "--config", config, "--request", request("id/ivanopcode-cedar"), "--json")
+	e, code, raw = runCLI(t, "identity", "show", "--config", config, "--request", request("id/example-owner-cedar"), "--json")
 	if code != 4 || e.Error.Code != "SNAPSHOT_CHANGED" || !e.Error.Retryable || strings.Contains(string(raw), "cedar") {
 		t.Fatalf("snapshot CLI refusal differs: %s", raw)
 	}
@@ -463,7 +468,7 @@ func TestCLIIdentityShow(t *testing.T) {
 		t.Fatal(err)
 	}
 	extended := filepath.Join(dir, "extended.json")
-	if err := os.WriteFile(extended, []byte(`{"name":"id/ivanopcode","role":"landlord"}`), 0600); err != nil {
+	if err := os.WriteFile(extended, []byte(`{"name":"id/example-owner","role":"landlord"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	duplicate := filepath.Join(dir, "duplicate.json")
@@ -474,13 +479,27 @@ func TestCLIIdentityShow(t *testing.T) {
 		{"identity", "show", "--config", "absent", "--request", oversize, "--json"},
 		{"identity", "show", "--config", "absent", "--request", extended, "--json"},
 		{"identity", "show", "--config", "absent", "--request", duplicate, "--json"},
-		{"identity", "show", "--config", config, "--request", request("id/ivanopcode")},
-		{"identity", "show", "--request", request("id/ivanopcode"), "--json"},
-		{"identity", "show", "--config", config, "--request", request("id/ivanopcode"), "--mode", "utxo-scan", "--json"},
+		{"identity", "show", "--config", config, "--request", request("id/example-owner")},
+		{"identity", "show", "--request", request("id/example-owner"), "--json"},
+		{"identity", "show", "--config", config, "--request", request("id/example-owner"), "--mode", "utxo-scan", "--json"},
 	} {
 		e, code, _ := runCLI(t, args...)
 		if code != 2 || e.Error.Code != "BAD_INPUT" || e.Network != "" {
 			t.Fatalf("invalid identity invocation admitted: %v -> %#v", args[2:], e.Error)
 		}
 	}
+}
+
+// publishedAgentLandlord reads the expected reference with the standard JSON
+// decoder, preserving the independently sourced mainnet value without copying
+// its personal reference into synthetic fixtures or expected-value literals.
+func publishedAgentLandlord(t *testing.T) string {
+	t.Helper()
+	var value struct {
+		Swarma struct{ Agent struct{ Landlord string } }
+	}
+	if err := json.Unmarshal([]byte(mainnetAgent), &value); err != nil {
+		t.Fatal(err)
+	}
+	return value.Swarma.Agent.Landlord
 }

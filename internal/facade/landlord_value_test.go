@@ -71,7 +71,7 @@ func TestValueBuildRefusals(t *testing.T) {
 	ok := `{"names":{"_":"` + vSocial + `"},"relays":{"` + vSocial + `":["wss://relay.example"]}}`
 	cases := []struct{ name, grant, desc, want string }{
 		{"extra-top-member", vGrant, `{"names":{"_":"` + vSocial + `"},"profile":"x"}`, "BAD_INPUT"},
-		{"extra-name", vGrant, `{"names":{"_":"` + vSocial + `","bob":"` + vSocial + `"}}`, "BAD_INPUT"},
+		{"extra-name", vGrant, `{"names":{"_":"` + vSocial + `","extra":"` + vSocial + `"}}`, "BAD_INPUT"},
 		{"duplicate-member", vGrant, `{"names":{"_":"` + vSocial + `"},"names":{"_":"` + vSocial + `"}}`, "BAD_INPUT"},
 		{"uppercase-grant", strings.ToUpper(vGrant), ok, "LANDLORD_KEY"},
 		{"compressed-grant", "02" + vGrant, ok, "LANDLORD_KEY"},

@@ -357,7 +357,7 @@ func TestGrantIssueRegtest(t *testing.T) {
 // Claim: with the mainnet names of the LIP-0013 vectors, draft builds exactly
 // each valid vector contract (bytes, hash, scope, budget, consent tags) and
 // lists the two digests the parties sign. Limit: draft only; the landlord
-// grant key in the fixture is a published test key, not id/ivanopcode's.
+// grant key in the fixture is a published test key, not the real on-chain landlord's.
 func TestGrantDraftReproducesLIP0013Vectors(t *testing.T) {
 	for _, vc := range loadLIP0013(t).ValidContracts {
 		t.Run(vc.ID, func(t *testing.T) {

@@ -27,7 +27,7 @@ The setup protects against:
 - **Secret disclosure by the tool.** No flag, environment variable or path makes either command print or write the secret. Output is one JSON envelope with public data and signatures only. Tests scan stdout, stderr, the terminal transcript and the process's file descriptors 1 and 2 for every encoding of the secret, and a control proves the scanner detects a planted secret.
 
 It does not protect against:
-- Malware running as Ivan that waits for a legitimate Touch ID approval and races the terminal. The display binds what is signed, not who asked.
+- Malware running as the owner that waits for a legitimate Touch ID approval and races the terminal. The display binds what is signed, not who asked.
 - A compromised macOS or a compromised `swarma-keychain` build. Build the tool from a reviewed commit on the Mac itself.
 - Loss of the item. There is no export and no backup; see [Recovery](#recovery).
 
@@ -98,7 +98,7 @@ Why this is accepted:
 
 This argument depends on the process being one-shot. Any later use of `internal/keysign` in a long-running process (a daemon, an agent, a library linked into a server) invalidates it, and that use must first complete the planned migration below.
 
-**Planned migration (owner decision, 2026-11-13).** Ivan decided to keep the current signer for now. Go gives no guarantee of erasing memory, so signing is planned to move to libsecp256k1 via cgo: `secp256k1_schnorrsig_sign32` and `secp256k1_ecdsa_sign`, which clear their own secret intermediates with `secp256k1_memclear`. The migration is not scheduled yet; the demo scale does not need it. It is recorded here and in `UNRESOLVED_QUESTIONS.md` so that it stays in view. The keyvault, once it is qualified, remains the later custody target (KEY-MAP K5): the key would then never enter this process.
+**Planned migration (owner decision, 2026-11-13).** The owner decided to keep the current signer for now. Go gives no guarantee of erasing memory, so signing is planned to move to libsecp256k1 via cgo: `secp256k1_schnorrsig_sign32` and `secp256k1_ecdsa_sign`, which clear their own secret intermediates with `secp256k1_memclear`. The migration is not scheduled yet; the demo scale does not need it. It is recorded here and in `UNRESOLVED_QUESTIONS.md` so that it stays in view. The keyvault, once it is qualified, remains the later custody target (KEY-MAP K5): the key would then never enter this process.
 
 Other limits:
 - **Timing.** Like the btcec routines it replaces (`…NonConst`), the multiplication by G branches on the scalar's bits. The threat model above does not include a local timing attacker.
@@ -184,9 +184,9 @@ The rendered value is accepted only when all of these agree with the intended ke
 
 Any difference is `VALUE_MISMATCH`. The result is `{value,value_hex,bytes,grant_key,social:{key,relays}}`. `value_hex` is what the lead node passes to `name_update`.
 
-## Ivan's sitting
+## The owner's sitting
 
-The acceptance gate is Ivan's dry run on his Mac with a **Developer-ID-signed app bundle**: keygen, sign a fixture request, then delete both dry-run items. Only after that gate passes is the real key created. Build from the reviewed commit:
+The acceptance gate is the owner's dry run on the Mac with a **Developer-ID-signed app bundle**: keygen, sign a fixture request, then delete both dry-run items. Only after that gate passes is the real key created. Build from the reviewed commit:
 
 ```sh
 git clone https://github.com/relux-works/swarma-identity && cd swarma-identity
@@ -227,7 +227,7 @@ There is none. The item is device-bound and biometry-bound: it cannot be exporte
 
 ## Developer ID signing for the data protection keychain
 
-**Entitlement decision closed, owner evidence 2026-11-13.** The ad-hoc `go build` binary returned `KEYCHAIN_ENTITLEMENT` (`errSecMissingEntitlement`, -34018) on Ivan's Mac (Darwin 27.2, Xcode 27, Go 1.26.8). Ivan chose option 1: sign with the Relux Works Developer ID. The bundle below passed `codesign --verify --strict`, and its `SecItemAdd` of the biometry-protected item succeeded. The subsequent protected public-key re-read failed with LAError -1004 → -25308; that separate product defect is addressed by the two-item layout above. This signing evidence closes the entitlement question, not the revised tool's Mac acceptance gate.
+**Entitlement decision closed, owner evidence 2026-11-13.** The ad-hoc `go build` binary returned `KEYCHAIN_ENTITLEMENT` (`errSecMissingEntitlement`, -34018) on the owner's Mac (Darwin 27.2, Xcode 27, Go 1.26.8). The owner chose option 1: sign with the Relux Works Developer ID. The bundle below passed `codesign --verify --strict`, and its `SecItemAdd` of the biometry-protected item succeeded. The subsequent protected public-key re-read failed with LAError -1004 → -25308; that separate product defect is addressed by the two-item layout above. This signing evidence closes the entitlement question, not the revised tool's Mac acceptance gate.
 
 The verified provisioning setup is:
 
