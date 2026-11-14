@@ -193,7 +193,7 @@ git clone https://github.com/relux-works/swarma-identity && cd swarma-identity
 git checkout <reviewed commit>
 mkdir -p .temp/bin
 go build -o .temp/bin/swarma-identity ./cmd/swarma-identity
-.scripts/build-keychain-bundle.sh /absolute/path/to/swarma-keychain-DevID.provisionprofile
+go run ./cmd/build-keychain-bundle /absolute/path/to/swarma-keychain-DevID.provisionprofile
 KEYCHAIN_CLI="$PWD/.temp/SwarmaKeychain.app/Contents/MacOS/swarma-keychain"
 ```
 
@@ -207,23 +207,23 @@ KEYCHAIN_CLI="$PWD/.temp/SwarmaKeychain.app/Contents/MacOS/swarma-keychain"
    ```
    Read the display, type `SIGN`, and authenticate with Touch ID; check that the public signatures verify. Remove **both** dry-run items afterwards in Keychain Access, under the data protection ("iCloud"/"Local Items") section: "Swarma grant key dryrun-2026-11" (service `works.relux.swarma-identity.grant-key`) and "Swarma grant public key dryrun-2026-11" (service `works.relux.swarma-identity.grant-key.pub`). Their account is `dryrun-2026-11`. Deletion does not require reading the protected secret. Confirm both are gone. Then create the real key:
    ```sh
-   "$KEYCHAIN_CLI" keychain keygen --label ivanopcode-grant-1 --json
+   "$KEYCHAIN_CLI" keychain keygen --label landlord-grant-1 --json
    ```
    Record `xonly_key`, `compressed_pubkey` and `p2pkh_address`. Nothing secret is printed.
-2. **Build the new landlord value.** Extract the current `nostr` descriptor of `id/ivanopcode` with `.temp/bin/swarma-identity name show` (`value_hex` → bytes → `.nostr`) into `social.json`, then:
+2. **Build the new landlord value.** Extract the current `nostr` descriptor of `id/example-landlord` with `.temp/bin/swarma-identity name show` (`value_hex` → bytes → `.nostr`) into `social.json`, then:
    ```sh
    "$KEYCHAIN_CLI" value build --grant-xonly <xonly_key> --social-descriptor social.json --json
    ```
    Hand `value_hex` to the lead node. The lead node decodes it, runs `testmempoolaccept` and broadcasts the `name_update` once.
 3. **Sign grants with the new key, after the name_update confirms.** Run `grant draft` and `grant consent` as before. Put the draft and the `to_sign` entries into a `swarma-keychain/sign/1` request and run:
    ```sh
-   "$KEYCHAIN_CLI" keychain sign --label ivanopcode-grant-1 --request req.json --json
+   "$KEYCHAIN_CLI" keychain sign --label landlord-grant-1 --request req.json --json
    ```
    Read the display, type `SIGN`, and touch the sensor once per signature. `landlord_sig` goes into `grant sign`. The grant stage's `grant_signing_hash` goes into a second sign request with `consent_event` and `landlord_sig`. The seal-spend signature goes into the spend transaction's input script.
 
 ## Recovery
 
-There is none. The item is device-bound and biometry-bound: it cannot be exported, it does not sync and it does not survive a Touch ID re-enrollment or a new Mac. If it is lost, deleted, or invalidated by enrolling a new fingerprint, the key is gone. The only remedy is a rotation: create a new key with `keygen`, then run `value build` and a `name_update` of `id/ivanopcode` with the new x-only key, signed by the name's owner wallet. Grants issued under the old key remain verifiable against the chain history, but no new grant can be signed with it.
+There is none. The item is device-bound and biometry-bound: it cannot be exported, it does not sync and it does not survive a Touch ID re-enrollment or a new Mac. If it is lost, deleted, or invalidated by enrolling a new fingerprint, the key is gone. The only remedy is a rotation: create a new key with `keygen`, then run `value build` and a `name_update` of `id/example-landlord` with the new x-only key, signed by the name's owner wallet. Grants issued under the old key remain verifiable against the chain history, but no new grant can be signed with it.
 
 ## Developer ID signing for the data protection keychain
 
@@ -240,13 +240,13 @@ The verified provisioning setup is:
 From the repository root on the owner's Mac, with that profile and the installed Developer ID Application identity:
 
 ```sh
-.scripts/build-keychain-bundle.sh /absolute/path/to/swarma-keychain-DevID.provisionprofile
+go run ./cmd/build-keychain-bundle /absolute/path/to/swarma-keychain-DevID.provisionprofile
 # Optional second argument selects a new output .app path.
 codesign --verify --strict .temp/SwarmaKeychain.app
 .temp/SwarmaKeychain.app/Contents/MacOS/swarma-keychain keychain keygen --label dryrun-2026-11 --json
 ```
 
-The script creates the bundle and entitlement plist under `.temp/` by default, builds without inherited Go test tags, and runs exactly:
+The command creates the bundle and entitlement plist under `.temp/` by default, builds without inherited Go test tags, and runs exactly:
 
 ```sh
 codesign --force --options runtime --entitlements .temp/SwarmaKeychain.entitlements.plist \
