@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/relux-works/swarma-identity/internal/keypolicy"
 	"os"
 	"path/filepath"
 	"testing"
@@ -44,7 +45,7 @@ func TestTestKeychainRoundTrip(t *testing.T) {
 	if _, err := s.Public(label); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("absent label: %v", err)
 	}
-	if err := s.Create(label, &secret, public); err != nil {
+	if err := s.Create(label, &secret, public, keypolicy.Default); err != nil {
 		t.Fatal(err)
 	}
 	if exists, err := s.Exists(label); err != nil || !exists {
@@ -56,17 +57,17 @@ func TestTestKeychainRoundTrip(t *testing.T) {
 	}
 	var other [32]byte
 	other[0] = 1
-	if err := s.Create(label, &other, public); !errors.Is(err, ErrExists) {
+	if err := s.Create(label, &other, public, keypolicy.Default); !errors.Is(err, ErrExists) {
 		t.Fatalf("duplicate label: %v", err)
 	}
 	var read [32]byte
-	if metadata, err := s.Secret(label, "test read", &read); err != nil || read != secret || !bytes.Equal(metadata, public) {
+	if metadata, err := s.Secret(label, "test read", &read, keypolicy.Default); err != nil || read != secret || !bytes.Equal(metadata, public) {
 		t.Fatalf("secret read: %v", err)
 	}
 	if !LastReadWiped() {
 		t.Fatal("the Keychain result buffer was released without being wiped")
 	}
-	if _, err := s.Secret(label+"-absent", "test read", &read); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Secret(label+"-absent", "test read", &read, keypolicy.Default); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("absent secret: %v", err)
 	}
 	if LastReadWiped() {
@@ -81,7 +82,7 @@ func TestTestKeychainRoundTrip(t *testing.T) {
 	if _, err := s.Public(label); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deletion left the public item: %v", err)
 	}
-	if _, err := s.Secret(label, "test deleted read", &read); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Secret(label, "test deleted read", &read, keypolicy.Default); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deletion left the secret item: %v", err)
 	}
 }
@@ -95,5 +96,101 @@ func TestTestKeychainPathGuard(t *testing.T) {
 		if _, err := Default(); !errors.Is(err, ErrTestPath) {
 			t.Fatalf("path %q admitted", p)
 		}
+	}
+}
+
+// Claim: each policy survives the real file-Keychain round trip; duplicates never rotate, mismatched/unknown records refuse without secret output, and authenticated mismatch results are wiped (no biometric ACL in this build).
+func TestTestKeychainAccessPolicies(t *testing.T) {
+	s, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, access := range []keypolicy.Policy{keypolicy.CurrentSet, keypolicy.Any, keypolicy.OrPasscode} {
+		t.Run(string(access), func(t *testing.T) {
+			label := fmt.Sprintf("policy-%d", time.Now().UnixNano())
+			t.Cleanup(func() {
+				if err := Delete(label); err != nil {
+					t.Error(err)
+				}
+			})
+			var secret [32]byte
+			raw, _ := hex.DecodeString(vectorSecret)
+			copy(secret[:], raw)
+			public := bytes.Repeat([]byte{0x02}, 33)
+			if err := s.Create(label, &secret, public, access); err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.Access(label)
+			if err != nil || got != access {
+				t.Fatalf("policy = %q, %v", got, err)
+			}
+			var read [32]byte
+			if metadata, err := s.Secret(label, "policy round trip", &read, access); err != nil || read != secret || !bytes.Equal(metadata, public) || !LastReadWiped() {
+				t.Fatalf("round trip: %v", err)
+			}
+			other := keypolicy.Any
+			if access == other {
+				other = keypolicy.OrPasscode
+			}
+			if err := s.Create(label, &secret, public, other); !errors.Is(err, ErrExists) {
+				t.Fatalf("duplicate rotated policy: %v", err)
+			}
+			if got, err := s.Access(label); err != nil || got != access {
+				t.Fatal("duplicate changed policy")
+			}
+			flags, _ := other.SecurityFlags()
+			if err := setTestAccess(label, byte(flags)); err != nil {
+				t.Fatal(err)
+			}
+			read = [32]byte{}
+			// Now public metadata matches the supplied choice, but authenticated metadata does not.
+			if metadata, err := s.Secret(label, "policy mismatch", &read, other); !errors.Is(err, keypolicy.ErrMismatch) || read != [32]byte{} || metadata != nil || !LastReadWiped() {
+				t.Fatalf("mismatch: %v", err)
+			}
+			if err := setTestAccess(label, 255); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Access(label); !errors.Is(err, keypolicy.ErrUnknown) {
+				t.Fatalf("unknown record: %v", err)
+			}
+		})
+	}
+}
+
+// Claim: a pre-policy two-item key is read as current-set without rewriting it, while another expected policy refuses with no secret output.
+func TestTestKeychainLegacyAccessPolicy(t *testing.T) {
+	s, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	label := fmt.Sprintf("legacy-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		if err := Delete(label); err != nil {
+			t.Error(err)
+		}
+	})
+	var secret [32]byte
+	raw, _ := hex.DecodeString(vectorSecret)
+	copy(secret[:], raw)
+	public := bytes.Repeat([]byte{0x02}, 33)
+	if err := s.Create(label, &secret, public, keypolicy.Default); err != nil {
+		t.Fatal(err)
+	}
+	if err := setTestLegacy(label); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Access(label); err != nil || got != keypolicy.CurrentSet {
+		t.Fatalf("legacy = %q, %v", got, err)
+	}
+	var read [32]byte
+	if _, err := s.Secret(label, "legacy read", &read, keypolicy.CurrentSet); err != nil || read != secret {
+		t.Fatalf("legacy read: %v", err)
+	}
+	read = [32]byte{}
+	if metadata, err := s.Secret(label, "wrong legacy policy", &read, keypolicy.Any); !errors.Is(err, keypolicy.ErrMismatch) || metadata != nil || read != [32]byte{} {
+		t.Fatalf("legacy mismatch: %v", err)
+	}
+	if got, err := s.Access(label); err != nil || got != keypolicy.CurrentSet {
+		t.Fatal("legacy policy changed")
 	}
 }

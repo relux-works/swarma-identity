@@ -15,7 +15,13 @@ package keychain
 #define SK_SERVICE "works.relux.swarma-identity.grant-key"
 #define SK_PUBLIC_SERVICE SK_SERVICE ".pub"
 
-enum { SK_OK = 0, SK_NOT_FOUND = 1, SK_EXISTS = 2, SK_CANCELED = 3, SK_AUTH = 4, SK_BIOMETRY = 5, SK_ENTITLEMENT = 6, SK_ITEM = 7, SK_STORE = 8, SK_INTERACTION = 9 };
+// The platform-neutral mapping is pinned to the public SDK, not a second
+// hand-written Darwin switch. Accessibility is fixed for every choice.
+_Static_assert(kSecAccessControlBiometryCurrentSet == 8, "current-set flag changed");
+_Static_assert(kSecAccessControlBiometryAny == 2, "any flag changed");
+_Static_assert(kSecAccessControlUserPresence == 1, "user-presence flag changed");
+
+enum { SK_OK = 0, SK_NOT_FOUND = 1, SK_EXISTS = 2, SK_CANCELED = 3, SK_AUTH = 4, SK_BIOMETRY = 5, SK_ENTITLEMENT = 6, SK_ITEM = 7, SK_STORE = 8, SK_INTERACTION = 9, SK_POLICY = 10 };
 
 static int sk_map(OSStatus st) {
 	switch (st) {
@@ -144,17 +150,17 @@ int sk_delete(const char *label) {
 }
 #endif
 
-static int sk_preflight(void) {
+static int sk_preflight(unsigned long flags) {
 #ifdef SK_TESTMODE
 	return sk_test_kc == NULL ? SK_STORE : SK_OK;
 #else
 	@autoreleasepool {
 		LAContext *ctx = [[LAContext alloc] init];
 		NSError *e = nil;
-		BOOL ok = [ctx canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics error:&e];
+		BOOL ok = [ctx canEvaluatePolicy:(flags == kSecAccessControlUserPresence ? LAPolicyDeviceOwnerAuthentication : LAPolicyDeviceOwnerAuthenticationWithBiometrics) error:&e];
 		[ctx invalidate];
 		[ctx release];
-		return ok ? SK_OK : SK_BIOMETRY;
+		return ok ? SK_OK : (flags == kSecAccessControlUserPresence ? SK_AUTH : SK_BIOMETRY);
 	}
 #endif
 }
@@ -207,20 +213,79 @@ static int sk_public(const char *label, unsigned char *out) {
 	return SK_OK;
 }
 
+// Only public metadata is queried here; protected attributes stay behind
+// confirmation. No policy metadata means a legacy current-set item.
+static int sk_access(const char *label, unsigned long *flags) {
+	CFTypeRef res = NULL;
+	int rc = sk_read_no_ui(label, SK_PUBLIC_SERVICE, 0, &res);
+	if (rc != SK_OK) { if (res != NULL) CFRelease(res); return rc; }
+	if (res == NULL || CFGetTypeID(res) != CFDictionaryGetTypeID()) { if (res != NULL) CFRelease(res); return SK_ITEM; }
+	CFTypeRef value = CFDictionaryGetValue((CFDictionaryRef)res, kSecAttrGeneric);
+	if (value == NULL || (CFGetTypeID(value) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)value) == 0)) { *flags = kSecAccessControlBiometryCurrentSet; }
+	else if (CFGetTypeID(value) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)value) == 1) {
+	 *flags = CFDataGetBytePtr((CFDataRef)value)[0];
+	} else { CFRelease(res); return SK_ITEM; }
+	CFRelease(res);
+	return SK_OK;
+}
+
+// Used by creation and the macOS construction tests. No Keychain operation or
+// authentication occurs when an access-control object is constructed.
+static SecAccessControlRef sk_control(unsigned long flags, CFErrorRef *err) {
+	return SecAccessControlCreateWithFlags(NULL, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, (SecAccessControlCreateFlags)flags, err);
+}
+
+static int sk_control_valid(unsigned long flags) {
+	CFErrorRef err = NULL;
+	SecAccessControlRef ac = sk_control(flags, &err);
+	int ok = ac != NULL && CFGetTypeID(ac) == SecAccessControlGetTypeID();
+	if (err != NULL) CFRelease(err);
+	if (ac != NULL) CFRelease(ac);
+	return ok;
+}
+
+#ifdef SK_TESTMODE
+// Test-only metadata mutation, confined to the guarded throwaway keychain.
+static int sk_test_metadata(const char *label, const char *service, const unsigned char *bytes, CFIndex n) {
+	CFMutableDictionaryRef q = sk_query(label, service, 0);
+	CFMutableDictionaryRef attrs = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+	CFDataRef data = CFDataCreate(NULL, bytes, n);
+	CFDictionarySetValue(attrs, kSecAttrGeneric, data);
+	OSStatus st = SecItemUpdate(q, attrs);
+	CFRelease(data); CFRelease(attrs); CFRelease(q);
+	return sk_map(st);
+}
+int sk_test_access(const char *label, unsigned char flags) {
+	return sk_test_metadata(label, SK_PUBLIC_SERVICE, &flags, 1);
+}
+int sk_test_legacy(const char *label) {
+	unsigned char pub[33];
+	int rc = sk_public(label, pub);
+	if (rc != SK_OK) return rc;
+	rc = sk_test_metadata(label, SK_SERVICE, pub, 33);
+	if (rc != SK_OK) return rc;
+	return sk_test_metadata(label, SK_PUBLIC_SERVICE, NULL, 0);
+}
+#endif
+
 // sk_create adds the protected secret, then a non-ACL public item. Release:
 // both are device-only, non-synchronizable data-protection items.
-static int sk_create(const char *label, const unsigned char *secret, const unsigned char *pub, int publen) {
+static int sk_create(const char *label, const unsigned char *secret, const unsigned char *pub, int publen, unsigned long flags) {
 	@autoreleasepool {
 		CFMutableDictionaryRef q = sk_query(label, SK_SERVICE, 1);
 		CFStringRef lbl = CFStringCreateWithFormat(NULL, NULL, CFSTR("Swarma grant key %s"), label);
 		CFDictionarySetValue(q, kSecAttrLabel, lbl);
 		CFRelease(lbl);
-		CFDataRef pd = CFDataCreate(NULL, pub, publen);
+		unsigned char metadata[34];
+		if (publen != 33) { CFRelease(q); return SK_ITEM; }
+		memcpy(metadata, pub, 33);
+		metadata[33] = (unsigned char)flags;
+		CFDataRef pd = CFDataCreate(NULL, metadata, 34);
 		CFDictionarySetValue(q, kSecAttrGeneric, pd);
 		CFRelease(pd);
 #ifndef SK_TESTMODE
 		CFErrorRef err = NULL;
-		SecAccessControlRef ac = SecAccessControlCreateWithFlags(NULL, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, kSecAccessControlBiometryCurrentSet, &err);
+		SecAccessControlRef ac = sk_control(flags, &err);
 		if (ac == NULL) { if (err != NULL) CFRelease(err); CFRelease(q); return SK_STORE; }
 		CFDictionarySetValue(q, kSecAttrAccessControl, ac);
 		CFRelease(ac);
@@ -245,6 +310,10 @@ static int sk_create(const char *label, const unsigned char *secret, const unsig
 #ifndef SK_TESTMODE
 		CFDictionarySetValue(q, kSecAttrAccessible, kSecAttrAccessibleWhenUnlockedThisDeviceOnly);
 #endif
+		unsigned char recorded = (unsigned char)flags;
+		pd = CFDataCreate(NULL, &recorded, 1);
+		CFDictionarySetValue(q, kSecAttrGeneric, pd);
+		CFRelease(pd);
 		pd = CFDataCreate(NULL, pub, publen);
 		CFDictionarySetValue(q, kSecValueData, pd);
 		CFRelease(pd);
@@ -259,10 +328,10 @@ static int sk_create(const char *label, const unsigned char *secret, const unsig
 }
 
 // sk_secret reads the secret into out32. Release: a new LAContext per call
-// with no reuse window, so every read is its own Touch ID evaluation; the
+// with no reuse window, so every read is its own policy evaluation; the
 // context is invalidated after the read. The framework's result is wiped
 // before it is released on every return path (sk_release_read).
-static int sk_secret(const char *label, const char *reason, unsigned char *out32, unsigned char *public33) {
+static int sk_secret(const char *label, const char *reason, unsigned char *out32, unsigned char *public33, unsigned long flags) {
 #ifdef SK_TESTMODE
 	sk_test_read_wiped = 0;
 #endif
@@ -290,7 +359,22 @@ static int sk_secret(const char *label, const char *reason, unsigned char *out32
 		CFTypeRef data = CFDictionaryGetValue((CFDictionaryRef)res, kSecValueData);
 		CFTypeRef generic = CFDictionaryGetValue((CFDictionaryRef)res, kSecAttrGeneric);
 		if (data == NULL || CFGetTypeID(data) != CFDataGetTypeID() || CFDataGetLength((CFDataRef)data) != 32 ||
-			generic == NULL || CFGetTypeID(generic) != CFDataGetTypeID() || CFDataGetLength((CFDataRef)generic) != 33) { sk_release_read(res); return SK_ITEM; }
+			generic == NULL || CFGetTypeID(generic) != CFDataGetTypeID() || (CFDataGetLength((CFDataRef)generic) != 33 && CFDataGetLength((CFDataRef)generic) != 34)) { sk_release_read(res); return SK_ITEM; }
+		// Compare the displayed record with authenticated policy metadata before
+		// exposing any secret bytes to Go. Legacy 33-byte metadata is current-set.
+		unsigned long recorded = CFDataGetLength((CFDataRef)generic) == 33 ? kSecAccessControlBiometryCurrentSet : CFDataGetBytePtr((CFDataRef)generic)[33];
+		if (recorded != flags) { sk_release_read(res); return SK_POLICY; }
+#ifndef SK_TESTMODE
+		// The public SDK exposes an opaque SecAccessControl, but no flag getter.
+		// Check the observable shape/protection; do not parse debug descriptions
+		// or call private SecAccessControlGetConstraints APIs to claim flag proof.
+		CFTypeRef ac = CFDictionaryGetValue((CFDictionaryRef)res, kSecAttrAccessControl);
+		CFTypeRef protection = CFDictionaryGetValue((CFDictionaryRef)res, kSecAttrAccessible);
+		if (ac == NULL || CFGetTypeID(ac) != SecAccessControlGetTypeID() ||
+			(protection != NULL && !CFEqual(protection, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly))) {
+			sk_release_read(res); return SK_POLICY;
+		}
+#endif
 		memcpy(out32, CFDataGetBytePtr((CFDataRef)data), 32);
 		memcpy(public33, CFDataGetBytePtr((CFDataRef)generic), 33);
 		sk_release_read(res);
@@ -300,9 +384,18 @@ static int sk_secret(const char *label, const char *reason, unsigned char *out32
 */
 import "C"
 
-import "unsafe"
+import (
+	"unsafe"
+
+	"github.com/relux-works/swarma-identity/internal/keypolicy"
+)
 
 type darwinStore struct{}
+
+func nativeControlValid(access keypolicy.Policy) bool {
+	flags, err := access.SecurityFlags()
+	return err == nil && C.sk_control_valid(C.ulong(flags)) == 1
+}
 
 func statusErr(rc C.int) error {
 	switch rc {
@@ -324,11 +417,34 @@ func statusErr(rc C.int) error {
 		return ErrItem
 	case C.SK_INTERACTION:
 		return ErrInteraction
+	case C.SK_POLICY:
+		return keypolicy.ErrMismatch
 	}
 	return ErrStore
 }
 
-func (darwinStore) Preflight() error { return statusErr(C.sk_preflight()) }
+func (darwinStore) Preflight(access keypolicy.Policy) error {
+	flags, err := access.SecurityFlags()
+	if err != nil {
+		return err
+	}
+	return statusErr(C.sk_preflight(C.ulong(flags)))
+}
+
+func (darwinStore) CanInspectAccess() bool { return false }
+
+func (darwinStore) Access(label string) (keypolicy.Policy, error) {
+	if !ValidLabel(label) {
+		return "", ErrItem
+	}
+	cl := C.CString(label)
+	defer C.free(unsafe.Pointer(cl))
+	var flags C.ulong
+	if err := statusErr(C.sk_access(cl, &flags)); err != nil {
+		return "", err
+	}
+	return keypolicy.FromFlags(uint64(flags))
+}
 
 func (darwinStore) Exists(label string) (bool, error) {
 	if !ValidLabel(label) {
@@ -360,16 +476,31 @@ func (darwinStore) Public(label string) ([]byte, error) {
 	return C.GoBytes(unsafe.Pointer(&buf[0]), 33), nil
 }
 
-func (darwinStore) Create(label string, secret *[32]byte, public []byte) error {
+func (darwinStore) Create(label string, secret *[32]byte, public []byte, access keypolicy.Policy) error {
+	flags, err := access.SecurityFlags()
+	if err != nil {
+		return err
+	}
 	if !ValidLabel(label) || len(public) != 33 {
 		return ErrItem
 	}
 	cl := C.CString(label)
 	defer C.free(unsafe.Pointer(cl))
-	return statusErr(C.sk_create(cl, (*C.uchar)(unsafe.Pointer(&secret[0])), (*C.uchar)(unsafe.Pointer(&public[0])), C.int(len(public))))
+	return statusErr(C.sk_create(cl, (*C.uchar)(unsafe.Pointer(&secret[0])), (*C.uchar)(unsafe.Pointer(&public[0])), C.int(len(public)), C.ulong(flags)))
 }
 
-func (darwinStore) Secret(label, reason string, dst *[32]byte) ([]byte, error) {
+func (darwinStore) Secret(label, reason string, dst *[32]byte, access keypolicy.Policy) ([]byte, error) {
+	flags, err := access.SecurityFlags()
+	if err != nil {
+		return nil, err
+	}
+	recorded, err := (darwinStore{}).Access(label)
+	if err != nil {
+		return nil, err
+	}
+	if recorded != access {
+		return nil, keypolicy.ErrMismatch
+	}
 	if !ValidLabel(label) || reason == "" {
 		return nil, ErrItem
 	}
@@ -378,7 +509,7 @@ func (darwinStore) Secret(label, reason string, dst *[32]byte) ([]byte, error) {
 	cr := C.CString(reason)
 	defer C.free(unsafe.Pointer(cr))
 	var public [33]C.uchar
-	if err := statusErr(C.sk_secret(cl, cr, (*C.uchar)(unsafe.Pointer(&dst[0])), &public[0])); err != nil {
+	if err := statusErr(C.sk_secret(cl, cr, (*C.uchar)(unsafe.Pointer(&dst[0])), &public[0], C.ulong(flags))); err != nil {
 		return nil, err
 	}
 	return C.GoBytes(unsafe.Pointer(&public[0]), 33), nil

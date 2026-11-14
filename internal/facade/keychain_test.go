@@ -22,6 +22,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/relux-works/swarma-identity/internal/keychain/keychainfake"
+	"github.com/relux-works/swarma-identity/internal/keypolicy"
 	"github.com/relux-works/swarma-identity/internal/keysign"
 )
 
@@ -70,6 +71,10 @@ func newKC(t *testing.T, answer string) *kcHarness {
 }
 
 func newKCWithStore(t *testing.T, answer string, store *keychainfake.Store, secretHex string) *kcHarness {
+	return newKCWithAccess(t, answer, store, secretHex, keypolicy.Default)
+}
+
+func newKCWithAccess(t *testing.T, answer string, store *keychainfake.Store, secretHex string, access keypolicy.Policy) *kcHarness {
 	h := &kcHarness{t: t, store: store}
 	h.term = &fakeTerminal{log: &h.log, answer: answer}
 	h.store.OnEvent = func(e string) {
@@ -80,7 +85,7 @@ func newKCWithStore(t *testing.T, answer string, store *keychainfake.Store, secr
 	}
 	secret, _ := hex.DecodeString(secretHex)
 	signer := keysign.NewWithStore(h.store, fixedReader(secret))
-	if _, err := signer.Keygen(kcLabel); err != nil {
+	if _, err := signer.Keygen(kcLabel, access); err != nil {
 		t.Fatal(err)
 	}
 	h.log = nil
@@ -440,7 +445,7 @@ func TestKeychainOutputsNeverCarrySecret(t *testing.T) {
 func mustDecode(s string) []byte { b, _ := hex.DecodeString(s); return b }
 
 // Claim: keygen prints exactly the public data (label, network, x-only key,
-// compressed key, P2PKH address) and refuses a bad label or network before
+// compressed key, P2PKH address, access policy) and refuses a bad label or network before
 // touching the store; swarma-identity itself refuses both keychain commands
 // with UNSUPPORTED_CAPABILITY because it links no signer.
 func TestKeychainKeygenAndCapability(t *testing.T) {
@@ -451,7 +456,7 @@ func TestKeychainKeygenAndCapability(t *testing.T) {
 	var members map[string]any
 	b, _ := json.Marshal(e.Result)
 	json.Unmarshal(b, &members)
-	if len(members) != 5 || e.Network != "main" {
+	if len(members) != 6 || e.Network != "main" {
 		t.Fatalf("keygen result members %v", members)
 	}
 	pub := resultAs[KeychainPublic](t, e)

@@ -25,6 +25,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 
 	"github.com/relux-works/swarma-identity/internal/keychain"
+	"github.com/relux-works/swarma-identity/internal/keypolicy"
 )
 
 // ErrSignature means a produced signature did not verify against the stored
@@ -47,7 +48,10 @@ func NewWithStore(store keychain.Store, entropy io.Reader) *Signer {
 // Keygen creates the key under a label that must not exist and returns only
 // the 33-byte compressed public key. The secret is drawn into a scratch and
 // wiped on every return path.
-func (s *Signer) Keygen(label string) ([]byte, error) {
+func (s *Signer) Keygen(label string, access keypolicy.Policy) ([]byte, error) {
+	if _, err := access.SecurityFlags(); err != nil {
+		return nil, err
+	}
 	if !keychain.ValidLabel(label) {
 		return nil, keychain.ErrItem
 	}
@@ -55,7 +59,7 @@ func (s *Signer) Keygen(label string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := store.Preflight(); err != nil {
+	if err := store.Preflight(access); err != nil {
 		return nil, err
 	}
 	switch exists, err := store.Exists(label); {
@@ -78,7 +82,7 @@ func (s *Signer) Keygen(label string) ([]byte, error) {
 		}
 	}
 	compressed := sc.public()
-	if err := store.Create(label, &sc.secret, compressed); err != nil {
+	if err := store.Create(label, &sc.secret, compressed, access); err != nil {
 		return nil, err
 	}
 	sc.wipe()
@@ -89,7 +93,33 @@ func (s *Signer) Keygen(label string) ([]byte, error) {
 	if !bytes.Equal(stored, compressed) {
 		return nil, keychain.ErrItem
 	}
+	recorded, err := store.Access(label)
+	if err != nil {
+		return nil, err
+	}
+	if recorded != access {
+		return nil, keypolicy.ErrMismatch
+	}
 	return compressed, nil
+}
+
+// Access reads the policy from the public companion without authentication.
+func (s *Signer) Access(label string) (keypolicy.Policy, bool, error) {
+	if !keychain.ValidLabel(label) {
+		return "", false, keychain.ErrItem
+	}
+	store, err := s.store()
+	if err != nil {
+		return "", false, err
+	}
+	access, err := store.Access(label)
+	if err != nil {
+		return "", false, err
+	}
+	if _, err := access.SecurityFlags(); err != nil {
+		return "", false, err
+	}
+	return access, store.CanInspectAccess(), nil
 }
 
 // Public returns the stored compressed public key without authentication.
@@ -117,7 +147,10 @@ func (s *Signer) Public(label string) ([]byte, error) {
 // withKey reads the secret once under a fresh authentication into a new
 // scratch, refuses a secret that is not the stored key, runs one signing
 // step, and wipes the scratch on every return path.
-func (s *Signer) withKey(label, reason string, step func(*scratch, *btcec.PublicKey) ([]byte, error)) ([]byte, error) {
+func (s *Signer) withKey(label, reason string, access keypolicy.Policy, step func(*scratch, *btcec.PublicKey) ([]byte, error)) ([]byte, error) {
+	if _, err := access.SecurityFlags(); err != nil {
+		return nil, err
+	}
 	stored, err := s.Public(label)
 	if err != nil {
 		return nil, err
@@ -129,7 +162,7 @@ func (s *Signer) withKey(label, reason string, step func(*scratch, *btcec.Public
 	}
 	sc := newScratch()
 	defer sc.wipe()
-	metadata, err := store.Secret(label, reason, &sc.secret)
+	metadata, err := store.Secret(label, reason, &sc.secret, access)
 	if err != nil {
 		return nil, err
 	}
@@ -144,11 +177,11 @@ func (s *Signer) withKey(label, reason string, step func(*scratch, *btcec.Public
 // SignSchnorr returns a 64-byte BIP-340 signature over a 32-byte digest, with
 // fresh auxiliary randomness from the entropy source (crypto/rand in
 // production), verified with the library against the stored key.
-func (s *Signer) SignSchnorr(label, reason string, digest []byte) ([]byte, error) {
+func (s *Signer) SignSchnorr(label, reason string, digest []byte, access keypolicy.Policy) ([]byte, error) {
 	if len(digest) != 32 || reason == "" {
 		return nil, keychain.ErrItem
 	}
-	return s.withKey(label, reason, func(sc *scratch, pub *btcec.PublicKey) ([]byte, error) {
+	return s.withKey(label, reason, access, func(sc *scratch, pub *btcec.PublicKey) ([]byte, error) {
 		if _, err := io.ReadFull(s.entropy, sc.aux[:]); err != nil {
 			return nil, keychain.ErrStore
 		}
@@ -177,11 +210,11 @@ func SchnorrVerifies(sig, digest []byte, pub *btcec.PublicKey) bool {
 // SignECDSA returns a strict-DER, low-S ECDSA signature over a 32-byte
 // sighash (RFC 6979 nonce), verified with the library against the stored
 // key. The caller adds the sighash type byte.
-func (s *Signer) SignECDSA(label, reason string, hash []byte) ([]byte, error) {
+func (s *Signer) SignECDSA(label, reason string, hash []byte, access keypolicy.Policy) ([]byte, error) {
 	if len(hash) != 32 || reason == "" {
 		return nil, keychain.ErrItem
 	}
-	return s.withKey(label, reason, func(sc *scratch, pub *btcec.PublicKey) ([]byte, error) {
+	return s.withKey(label, reason, access, func(sc *scratch, pub *btcec.PublicKey) ([]byte, error) {
 		return signECDSA(sc, pub, hash)
 	})
 }

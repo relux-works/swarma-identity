@@ -1,6 +1,6 @@
 # Keychain grant key (G1-K)
 
-The landlord grant key signs BIP-340 grant digests and the ECDSA P2PKH spend of a grant's seal. It is a secp256k1 key, and the Secure Enclave holds only P-256 keys. On a Mac the key is therefore a software key: a Keychain generic-password item that is read under Touch ID for each signature (decision D2). This document covers the `swarma-keychain` binary that holds that key, and `value build`, which publishes it.
+The landlord grant key signs BIP-340 grant digests and the ECDSA P2PKH spend of a grant's seal. It is a secp256k1 key, and the Secure Enclave holds only P-256 keys. On a Mac the key is therefore a software key: a Keychain generic-password item that is read under fresh user authentication for each signature (decision D2), with the explicit access policy chosen at key generation. This document covers the `swarma-keychain` binary that holds that key, and `value build`, which publishes it.
 
 ## Binaries and the custody boundary
 
@@ -14,7 +14,7 @@ The landlord grant key signs BIP-340 grant digests and the ECDSA P2PKH spend of 
 ## Threat model
 
 The setup protects against:
-- **Key exfiltration from the Mac by other processes.** The item is stored in the data protection keychain under `SecAccessControl` with `biometryCurrentSet` and `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`, and it is not synchronizable. Every read needs a Touch ID match from the fingerprints enrolled when the item was created; enrolling a new finger invalidates the item. The item never leaves this device: it is not in iCloud Keychain or in backups that restore to another device.
+- **Key exfiltration from the Mac by other processes.** The item is stored in the data protection keychain under `SecAccessControl` with the selected biometric/passcode policy (default `biometryCurrentSet`) and, for **every** choice, `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`, and it is not synchronizable. With the default, every read needs a Touch ID match from the fingerprints enrolled when the item was created; any fingerprint enrollment change permanently invalidates the item. The other choices trade this restriction for enrollment resilience or passcode fallback; see [Access policy](#access-policy). The item never leaves this device: it is not in iCloud Keychain or in backups that restore to another device.
 - **Public-key substitution.** The compressed 33-byte public key is also stored as the value of a separate generic-password item: service `works.relux.swarma-identity.grant-key.pub`, the same label/account, data protection keychain, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, not synchronizable, with no biometry access control. This public data is read without interaction before the display. The protected secret item's `kSecAttrGeneric` retains the same public key. After confirmation and Touch ID, the signer derives the public key from the authenticated secret and requires it to equal **both** the separate public item and the authenticated `kSecAttrGeneric`. A swap is detected with `KEY_ITEM_INVALID` after Touch ID and before any signature is returned. A missing public item refuses with `KEY_PUBLIC_NOT_FOUND` before the display or Touch ID. The public item is not an authority to sign.
 - **Signing something other than what was shown.** `keychain sign` re-derives each requested digest before showing anything, as the SHA-256 of the exact bytes the display then shows:
   - `contract_sha256` is the SHA-256 of the draft's contract bytes.
@@ -22,7 +22,7 @@ The setup protects against:
   - The seal spend must spend exactly the draft's seal outpoint from P2PKH(this key).
 
   A digest that is not bound this way is refused with `DIGEST_BINDING` (or the PR 8 refusal code) before the display, so a modified request cannot borrow an approval.
-- **Approving by accident or by script.** The display and the confirmation use the controlling terminal (`/dev/tty`), not stdin or stdout. Only the exact line `SIGN` approves; anything else is `CONFIRMATION_DECLINED`, and no key read happens. Each signature then asks for Touch ID separately: a fresh `LAContext` is used with no reuse window and is invalidated after the read.
+- **Approving by accident or by script.** The display and the confirmation use the controlling terminal (`/dev/tty`), not stdin or stdout. Only the exact line `SIGN` approves; anything else is `CONFIRMATION_DECLINED`, and no key read happens. Each signature then asks for the chosen authentication separately: a fresh `LAContext` is used with no reuse window and is invalidated after the read.
 - **A swapped or corrupted item.** The public key is stored beside the secret, in `kSecAttrGeneric`. A secret that does not derive that public key is refused (`KEY_ITEM_INVALID`). Every signature is verified against the stored key before output, and the seal-spend input must also execute under the standard script flags (strict DER, low-S).
 - **Secret disclosure by the tool.** No flag, environment variable or path makes either command print or write the secret. Output is one JSON envelope with public data and signatures only. Tests scan stdout, stderr, the terminal transcript and the process's file descriptors 1 and 2 for every encoding of the secret, and a control proves the scanner detects a planted secret.
 
@@ -105,12 +105,65 @@ Other limits:
 
 ## Commands
 
-### `keychain keygen --label NAME [--network main|test|regtest] --json`
+### Access policy
 
-`NAME` is 1..63 bytes of `[a-z0-9._-]`, starting with `[a-z0-9]`; the network defaults to `main`. The command first checks that Touch ID is usable (`BIOMETRY_UNAVAILABLE` otherwise) and that neither the public nor the protected secret item uses the label (`KEY_EXISTS`); in either case it draws no entropy and creates nothing. An existing public item reserves the label; if it is absent, a no-interaction secret query returning `errSecInteractionNotAllowed` (-25308) also means `KEY_EXISTS`, never `KEYCHAIN_ERROR`. It then generates the key from the OS CSPRNG, adds the protected secret and its public metadata, and adds the separate non-ACL public item. If the public add fails, it deletes the just-added secret without authentication and refuses. It re-reads only the separate public item without interaction, checks it against the generated public key, and returns:
+`keychain keygen --access POLICY` makes an explicit, recorded choice. Omitting
+`--access` keeps **`biometry-current-set`**, unchanged from earlier releases.
+Unknown values, including an explicitly empty value, refuse with
+`UNKNOWN_ACCESS_POLICY` (exit 2) before any Keychain call or entropy draw.
+
+| Choice | Security framework flag | Trade-off |
+| --- | --- | --- |
+| `biometry-current-set` (default) | `kSecAccessControlBiometryCurrentSet` | Adding or removing a fingerprint makes the key unusable forever. Recovery requires a new key and a `name_update` signed with the name's owner key. |
+| `biometry-any` | `kSecAccessControlBiometryAny` | The key survives fingerprint enrollment changes, but anyone who enrolls a finger can sign. |
+| `biometry-or-passcode` | `kSecAccessControlUserPresence` | Biometry **or the device passcode** unlocks the key. On macOS the fallback is the user's device/login password. This also survives enrollment changes and does not require enrolled biometry. |
+
+The flag definitions and the user-presence equivalence to biometry OR passcode
+are documented in [Apple's public Security header](https://github.com/apple-oss-distributions/Security/blob/main/keychain/headers/SecAccessControl.h)
+and [userPresence documentation](https://developer.apple.com/documentation/security/secaccesscontrolcreateflags/userpresence).
+All choices retain `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`, the data
+protection keychain, and non-synchronizable storage. None permits export,
+restoration to another Mac, or an in-place policy change. Reusing a label always
+refuses `KEY_EXISTS`, even with another `--access` value. To change policy,
+create a **new key under a new label** and rotate the on-chain grant key with a
+`name_update` signed by the name's owner key; editing a JSON record is not rotation.
+
+The selected `access_policy` is returned in keygen's public record and in every
+sign result, persisted with the public companion and the protected item's
+metadata, and shown before every signing confirmation and in each authentication
+prompt. Save the public envelope explicitly, for example:
+
+```sh
+"$KEYCHAIN_CLI" keychain keygen --label landlord-grant-2 --access biometry-any --json > .temp/grant-key-landlord-grant-2.public.json
+```
+
+Signing reads that persisted public companion by label, not an arbitrary JSON
+file. The saved `grant-key-*.public.json` envelope is its public receipt, not an
+input that can change custody. After approval, the displayed policy must match
+the policy metadata returned with the authenticated secret, or signing refuses
+`ACCESS_POLICY_MISMATCH` with no signature/result. Public records containing an
+unknown policy refuse `UNKNOWN_ACCESS_POLICY`. Existing pre-policy two-item keys
+have no public policy byte and a 33-byte protected public key: these are read as
+the historical `biometry-current-set` policy without rewriting either item.
+
+**Native inspection limit.** The public macOS Security SDK exposes an opaque
+`SecAccessControl` but no getter for its biometric/passcode flags. The signer
+therefore cannot independently attest those live flags; every sign display says
+`Native ACL flags: unavailable through public Security APIs`. It checks the
+returned access-control type and the device-only protection attribute when
+returned, plus the authenticated policy metadata. It does not use private APIs
+or parse debug descriptions. If a store supports independent flag inspection,
+a disagreement must refuse; the fake tests exercise that contract. Metadata
+agreement is not proof of native ACL equivalence. The native constructor and
+fixed protection are separately tested on macOS; an owner-signed hardware run
+is still required for actual Touch ID/passcode and enrollment semantics.
+
+### `keychain keygen --label NAME [--network main|test|regtest] [--access POLICY] --json`
+
+`NAME` is 1..63 bytes of `[a-z0-9._-]`, starting with `[a-z0-9]`; the network defaults to `main`. After validating the policy, the command first checks that the chosen authentication is usable (`BIOMETRY_UNAVAILABLE` for biometric-only choices, `AUTH_FAILED` for the passcode choice; the latter uses device-owner authentication rather than requiring biometry) and that neither the public nor the protected secret item uses the label (`KEY_EXISTS`); in either case it draws no entropy and creates nothing. An existing public item reserves the label; if it is absent, a no-interaction secret query returning `errSecInteractionNotAllowed` (-25308) also means `KEY_EXISTS`, never `KEYCHAIN_ERROR`. It then generates the key from the OS CSPRNG, adds the protected secret with its public key plus policy byte in `kSecAttrGeneric`, and adds the separate non-ACL public item with that same policy byte in its own `kSecAttrGeneric`. The public value remains the 33-byte compressed key. If the public add fails, it deletes the just-added secret without authentication and refuses. It re-reads only the separate public item without interaction, checks it against the generated public key, and returns:
 
 ```json
-{"label":"…","network":"main","xonly_key":"<64 hex>","compressed_pubkey":"<66 hex>","p2pkh_address":"N…/M…"}
+{"label":"…","network":"main","xonly_key":"<64 hex>","compressed_pubkey":"<66 hex>","p2pkh_address":"N…/M…","access_policy":"biometry-current-set"}
 ```
 
 ### `keychain sign --label NAME --request FILE --json`
@@ -138,7 +191,7 @@ Other limits:
 - `to_sign` may be empty only when `seal_spend` is present.
 
 The terminal shows the following before the confirmation prompt:
-- the label, the key and its P2PKH address
+- the label, access policy, device-only constraint, native inspection limit, key and P2PKH address
 - the network and genesis
 - the landlord, the agent, and the grantee key and name
 - the scope and budget
@@ -168,7 +221,8 @@ Refusal codes:
 | `SEAL_OUTPOINT_MISMATCH`, `SEAL_SCRIPT_MISMATCH`, `SEAL_SPEND_*` | The seal spend is not acceptable. |
 | `NO_TERMINAL` | There is no controlling terminal. |
 | `CONFIRMATION_DECLINED` | The human did not type `SIGN`. |
-| `AUTH_CANCELED`, `AUTH_FAILED` | The Touch ID prompt was canceled or failed. |
+| `AUTH_CANCELED`, `AUTH_FAILED` | The selected authentication prompt was canceled or failed. |
+| `UNKNOWN_ACCESS_POLICY`, `ACCESS_POLICY_MISMATCH` | Unknown policy, or displayed policy disagrees with authenticated policy metadata (or actual ACL where independently inspectable); no signature is returned. |
 | `KEYCHAIN_ENTITLEMENT` | See [Developer ID signing](#developer-id-signing-for-the-data-protection-keychain). |
 | `SIGNATURE_VERIFY` | A produced signature did not verify. |
 
@@ -209,7 +263,7 @@ KEYCHAIN_CLI="$PWD/.temp/SwarmaKeychain.app/Contents/MacOS/swarma-keychain"
    ```sh
    "$KEYCHAIN_CLI" keychain keygen --label landlord-grant-1 --json
    ```
-   Record `xonly_key`, `compressed_pubkey` and `p2pkh_address`. Nothing secret is printed.
+   Record `xonly_key`, `compressed_pubkey`, `p2pkh_address` and `access_policy`. Nothing secret is printed.
 2. **Build the new landlord value.** Extract the current `nostr` descriptor of `id/example-landlord` with `.temp/bin/swarma-identity name show` (`value_hex` → bytes → `.nostr`) into `social.json`, then:
    ```sh
    "$KEYCHAIN_CLI" value build --grant-xonly <xonly_key> --social-descriptor social.json --json
@@ -219,11 +273,11 @@ KEYCHAIN_CLI="$PWD/.temp/SwarmaKeychain.app/Contents/MacOS/swarma-keychain"
    ```sh
    "$KEYCHAIN_CLI" keychain sign --label landlord-grant-1 --request req.json --json
    ```
-   Read the display, type `SIGN`, and touch the sensor once per signature. `landlord_sig` goes into `grant sign`. The grant stage's `grant_signing_hash` goes into a second sign request with `consent_event` and `landlord_sig`. The seal-spend signature goes into the spend transaction's input script.
+   Read the display, type `SIGN`, and authenticate once per signature with the selected policy. `landlord_sig` goes into `grant sign`. The grant stage's `grant_signing_hash` goes into a second sign request with `consent_event` and `landlord_sig`. The seal-spend signature goes into the spend transaction's input script.
 
 ## Recovery
 
-There is none. The item is device-bound and biometry-bound: it cannot be exported, it does not sync and it does not survive a Touch ID re-enrollment or a new Mac. If it is lost, deleted, or invalidated by enrolling a new fingerprint, the key is gone. The only remedy is a rotation: create a new key with `keygen`, then run `value build` and a `name_update` of `id/example-landlord` with the new x-only key, signed by the name's owner wallet. Grants issued under the old key remain verifiable against the chain history, but no new grant can be signed with it.
+There is no export or backup recovery. Every policy is device-bound and cannot survive loss of the item or a new Mac. With the default `biometry-current-set`, adding or removing a fingerprint makes the key unusable forever. `biometry-any` and `biometry-or-passcode` survive enrollment changes, with the trade-offs above. If the item is lost, deleted, or invalidated, the key is gone. The only remedy is a rotation: create a new key with `keygen`, then run `value build` and a `name_update` of `id/example-landlord` with the new x-only key, signed by the name's owner wallet. Grants issued under the old key remain verifiable against the chain history, but no new grant can be signed with it.
 
 ## Developer ID signing for the data protection keychain
 
@@ -263,6 +317,29 @@ The owner's signed-build log showed a successful secret add, followed by a faile
 Hosted macOS CI uses a throwaway **file** keychain with no biometry ACL. It checks the native two-item round trip and result wiping, but cannot establish this data-protection/biometry behaviour. `keychainfake.InteractionRequired` models every unauthenticated protected-item read as interaction-required. The positive test runs keygen then all signing paths in that mode. Five named negatives cover a protected-only duplicate (and a public-only duplicate), missing public item before Touch ID, swapped public item after Touch ID, failed public add with secret rollback, and swapped authenticated `kSecAttrGeneric`. The calibration restores the old protected-item public read and requires the same positive test to fail specifically with interaction-required, not a build error. The owner's signed-bundle dry run remains required.
 
 ## Tests
+
+Access-policy tests run on Linux and macOS: `TestSecurityFlags`,
+`TestUnknownPolicy`, `TestKeychainAccessPolicyKeygen` (including the public JSON
+file round trip), `TestKeychainUnknownAccessPolicyNoStoreCall`,
+`TestKeychainAccessPolicySign`, `TestKeychainAccessPolicyMismatch`,
+`TestKeychainAccessPolicyInspectionUnavailable`, and
+`TestKeychainAccessPolicyNeverUpdatesExistingItem`,
+`TestKeychainAccessPolicyChangedAfterDisplay`, and
+`TestKeygenUnknownAccessBeforeStore`. The independent fake ACL
+mismatch case is a store-contract test, not native introspection evidence.
+The public-data binary still links neither `keychain` nor `keysign`.
+
+The existing macOS CI job also runs `TestNativeAccessPolicyConstruction`
+against Security.framework and `TestTestKeychainAccessPolicies` / `TestTestKeychainLegacyAccessPolicy` against its
+throwaway file Keychain. The latter checks each stored policy, authentication
+metadata consistency, duplicate-label immutability, and the read-result wipe;
+it deliberately has no biometric ACL. **Untested on Linux and hosted CI:** real
+Touch ID/passcode/password approval/cancellation, enrollment-change survival or
+permanent invalidation, native ACL flag equivalence, and the owner Developer-ID
+bundle/entitlement path for each policy. These require the owner's signed-bundle
+hardware dry run before creating or rotating a real key. No such live key or
+`name_update` is made by these tests.
+
 
 | Where | What |
 | --- | --- |

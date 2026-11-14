@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/relux-works/swarma-identity/internal/keychain"
+	"github.com/relux-works/swarma-identity/internal/keypolicy"
 	"github.com/relux-works/swarma-identity/internal/keysign"
 )
 
@@ -17,14 +18,14 @@ type recordingStore struct {
 	log *[]string
 }
 
-func (r recordingStore) Secret(label, reason string, dst *[32]byte) ([]byte, error) {
+func (r recordingStore) Secret(label, reason string, dst *[32]byte, access keypolicy.Policy) ([]byte, error) {
 	*r.log = append(*r.log, "secret:"+label)
-	return r.Store.Secret(label, reason, dst)
+	return r.Store.Secret(label, reason, dst, access)
 }
 
-func (r recordingStore) Create(label string, secret *[32]byte, public []byte) error {
+func (r recordingStore) Create(label string, secret *[32]byte, public []byte, access keypolicy.Policy) error {
 	*r.log = append(*r.log, "create:"+label)
-	return r.Store.Create(label, secret, public)
+	return r.Store.Create(label, secret, public, access)
 }
 
 // Claim: end to end against the CI job's throwaway file keychain (test build,

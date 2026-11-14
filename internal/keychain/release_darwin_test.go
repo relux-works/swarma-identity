@@ -5,6 +5,7 @@ package keychain
 import (
 	"errors"
 	"fmt"
+	"github.com/relux-works/swarma-identity/internal/keypolicy"
 	"os"
 	"testing"
 	"time"
@@ -24,7 +25,7 @@ func TestReleaseStoreOnRunner(t *testing.T) {
 	if err != nil || TestMode {
 		t.Fatal("release build expected")
 	}
-	if err := s.Preflight(); !errors.Is(err, ErrBiometry) {
+	if err := s.Preflight(keypolicy.Default); !errors.Is(err, ErrBiometry) {
 		t.Fatalf("preflight on a runner without biometry: %v", err)
 	}
 	_, err = s.Public(fmt.Sprintf("probe-%d", time.Now().UnixNano()))

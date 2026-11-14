@@ -4,8 +4,8 @@
 // into the caller's buffer for one signature; nothing here prints, logs or
 // writes it anywhere else.
 //
-// Release builds on darwin use the data protection keychain with a
-// biometryCurrentSet, this-device-only access control. The build tag
+// Release builds on darwin use the data protection keychain with an explicit
+// policy (default biometryCurrentSet), this-device-only access control. The build tag
 // keychaintest replaces that with a throwaway file keychain and no access
 // control, for hosted CI only; release builds never carry it.
 package keychain
@@ -13,6 +13,8 @@ package keychain
 import (
 	"errors"
 	"regexp"
+
+	"github.com/relux-works/swarma-identity/internal/keypolicy"
 )
 
 // Service holds the protected secret and its public-key metadata; PublicService
@@ -40,13 +42,19 @@ var (
 // without interaction, treating a protected query's interaction refusal as
 // existence. Create adds secret then public, rolling back the secret if the
 // public add fails. Secret reads the 32-byte secret into dst and returns its
-// kSecAttrGeneric public key under one fresh authentication per call.
+// kSecAttrGeneric public key under one fresh authentication per call, refusing
+// disagreement with the expected policy metadata and actual ACL where readable.
+// Access reads the public companion policy without authenticating; legacy
+// two-item keys have the historical current-set policy.
 type Store interface {
-	Preflight() error
+	Preflight(access keypolicy.Policy) error
 	Exists(label string) (bool, error)
 	Public(label string) ([]byte, error)
-	Create(label string, secret *[32]byte, public []byte) error
-	Secret(label, reason string, dst *[32]byte) ([]byte, error)
+	Create(label string, secret *[32]byte, public []byte, access keypolicy.Policy) error
+	Secret(label, reason string, dst *[32]byte, access keypolicy.Policy) ([]byte, error)
+	Access(label string) (keypolicy.Policy, error)
+	// CanInspectAccess reports whether Secret can independently check native ACL flags.
+	CanInspectAccess() bool
 }
 
 var labelRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)

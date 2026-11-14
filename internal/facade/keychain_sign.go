@@ -20,6 +20,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/relux-works/swarma-chain-lab/experiments/rental"
+	"github.com/relux-works/swarma-identity/internal/keypolicy"
 )
 
 // The Keychain grant key (G1-K). This package never touches the secret: the
@@ -46,10 +47,11 @@ type Terminal interface {
 // GrantKeySigner is the custody seam. Public never prompts; each Sign call
 // is one authentication and one signature.
 type GrantKeySigner interface {
-	Keygen(label string) ([]byte, error)
+	Keygen(label string, access keypolicy.Policy) ([]byte, error)
+	Access(label string) (keypolicy.Policy, bool, error)
 	Public(label string) ([]byte, error)
-	SignSchnorr(label, reason string, digest []byte) ([]byte, error)
-	SignECDSA(label, reason string, hash []byte) ([]byte, error)
+	SignSchnorr(label, reason string, digest []byte, access keypolicy.Policy) ([]byte, error)
+	SignECDSA(label, reason string, hash []byte, access keypolicy.Policy) ([]byte, error)
 }
 
 type keychainDeps struct {
@@ -85,7 +87,7 @@ func (t *ttyTerminal) Confirm(prompt string) (bool, error) {
 // internal/keysign errors are their code strings). facade does not import
 // the Keychain store, so swarma-identity links none of it.
 var keychainCodes = map[string]bool{"KEY_NOT_FOUND": true, "KEY_PUBLIC_NOT_FOUND": true, "KEY_EXISTS": true, "AUTH_CANCELED": true, "AUTH_FAILED": true, "BIOMETRY_UNAVAILABLE": true,
-	"KEYCHAIN_ENTITLEMENT": true, "KEY_ITEM_INVALID": true, "KEYCHAIN_ERROR": true, "KEYCHAIN_TEST_PATH": true, "SIGNATURE_VERIFY": true}
+	"KEYCHAIN_ENTITLEMENT": true, "KEY_ITEM_INVALID": true, "KEYCHAIN_ERROR": true, "KEYCHAIN_TEST_PATH": true, "SIGNATURE_VERIFY": true, "UNKNOWN_ACCESS_POLICY": true, "ACCESS_POLICY_MISMATCH": true}
 
 const errItem = "KEY_ITEM_INVALID"
 
@@ -108,14 +110,15 @@ func validLabel(label string) bool { return labelPattern.MatchString(label) }
 // KeychainPublic is the public data of one grant key. Nothing else about the
 // key is ever output.
 type KeychainPublic struct {
-	Label            string `json:"label"`
-	Network          string `json:"network"`
-	XOnlyKey         string `json:"xonly_key"`
-	CompressedPubkey string `json:"compressed_pubkey"`
-	P2PKHAddress     string `json:"p2pkh_address"`
+	Label            string           `json:"label"`
+	Network          string           `json:"network"`
+	XOnlyKey         string           `json:"xonly_key"`
+	CompressedPubkey string           `json:"compressed_pubkey"`
+	P2PKHAddress     string           `json:"p2pkh_address"`
+	AccessPolicy     keypolicy.Policy `json:"access_policy"`
 }
 
-func publicOf(label, network string, pub *btcec.PublicKey) (KeychainPublic, *Failure) {
+func publicOf(label, network string, pub *btcec.PublicKey, access keypolicy.Policy) (KeychainPublic, *Failure) {
 	params, ok := networkParams(network)
 	if !ok {
 		return KeychainPublic{}, fail("BAD_INPUT")
@@ -125,12 +128,15 @@ func publicOf(label, network string, pub *btcec.PublicKey) (KeychainPublic, *Fai
 	if err != nil {
 		return KeychainPublic{}, fail("INTERNAL")
 	}
-	return KeychainPublic{label, network, hex.EncodeToString(schnorr.SerializePubKey(pub)), hex.EncodeToString(compressed), addr.EncodeAddress()}, nil
+	return KeychainPublic{label, network, hex.EncodeToString(schnorr.SerializePubKey(pub)), hex.EncodeToString(compressed), addr.EncodeAddress(), access}, nil
 }
 
 // KeychainKeygen creates a new grant key under a label that must not exist
 // and returns its public data only.
-func KeychainKeygen(deps keychainDeps, label, network string) (*KeychainPublic, *Failure) {
+func KeychainKeygen(deps keychainDeps, label, network string, access keypolicy.Policy) (*KeychainPublic, *Failure) {
+	if _, err := access.SecurityFlags(); err != nil {
+		return nil, &Failure{Code: "UNKNOWN_ACCESS_POLICY", Message: "Choose biometry-current-set, biometry-any, or biometry-or-passcode.", Exit: 2}
+	}
 	if !validLabel(label) {
 		return nil, fail("BAD_INPUT")
 	}
@@ -140,7 +146,7 @@ func KeychainKeygen(deps keychainDeps, label, network string) (*KeychainPublic, 
 	if deps.signer == nil {
 		return nil, fail("UNSUPPORTED_CAPABILITY")
 	}
-	compressed, err := deps.signer.Keygen(label)
+	compressed, err := deps.signer.Keygen(label, access)
 	if err != nil {
 		return nil, keychainFailure(err)
 	}
@@ -148,7 +154,7 @@ func KeychainKeygen(deps keychainDeps, label, network string) (*KeychainPublic, 
 	if err != nil || len(compressed) != 33 {
 		return nil, keychainFailure(errors.New(errItem))
 	}
-	out, f := publicOf(label, network, pub)
+	out, f := publicOf(label, network, pub, access)
 	if f != nil {
 		return nil, f
 	}
@@ -388,12 +394,16 @@ func renderPreimage(w func(string, ...any), it signItem, d GrantDraft) {
 
 // renderSignRequest is every field the human approves. The confirmation
 // covers exactly this text.
-func renderSignRequest(r KeychainSignRequest, tc TrustContract, key KeychainPublic, items []signItem, spend *sealSpendPlan) string {
+func renderSignRequest(r KeychainSignRequest, tc TrustContract, key KeychainPublic, items []signItem, spend *sealSpendPlan, inspectable bool) string {
 	d := r.Draft
 	var b strings.Builder
 	w := func(format string, a ...any) { fmt.Fprintf(&b, format, a...) }
 	w("\n=== SWARMA GRANT KEY: SIGNING REQUEST ===\n")
 	w("Keychain label     : %s\n", key.Label)
+	w("Access policy      : %s (this-device-only)\n", key.AccessPolicy)
+	if !inspectable {
+		w("Native ACL flags   : unavailable through public Security APIs; authenticated policy metadata is checked before signing.\n")
+	}
 	w("Signing key x-only : %s\n", key.XOnlyKey)
 	w("Signing key P2PKH  : %s\n", key.P2PKHAddress)
 	w("Network            : %s (genesis %s)\n", d.Network, d.Genesis)
@@ -423,7 +433,11 @@ func renderSignRequest(r KeychainSignRequest, tc TrustContract, key KeychainPubl
 	if spend != nil {
 		n++
 	}
-	w("Each of the %d signature(s) asks for Touch ID separately.\n", n)
+	if key.AccessPolicy == keypolicy.OrPasscode {
+		w("Each of the %d signature(s) asks for biometry or the device passcode/password separately.\n", n)
+	} else {
+		w("Each of the %d signature(s) asks for Touch ID separately.\n", n)
+	}
 	return b.String()
 }
 
@@ -484,7 +498,11 @@ func (deps keychainDeps) sign(label string, r KeychainSignRequest) (*KeychainSig
 	if err != nil || len(stored) != 33 {
 		return nil, network, keychainFailure(errors.New(errItem))
 	}
-	key, f := publicOf(label, r.Draft.Network, pub)
+	access, inspectable, err := deps.signer.Access(label)
+	if err != nil {
+		return nil, network, keychainFailure(err)
+	}
+	key, f := publicOf(label, r.Draft.Network, pub, access)
 	if f != nil {
 		return nil, network, f
 	}
@@ -502,7 +520,7 @@ func (deps keychainDeps) sign(label string, r KeychainSignRequest) (*KeychainSig
 	if err != nil {
 		return nil, network, keychainRefuse("NO_TERMINAL")
 	}
-	if err := term.Show(renderSignRequest(r, tc, key, items, spend)); err != nil {
+	if err := term.Show(renderSignRequest(r, tc, key, items, spend, inspectable)); err != nil {
 		return nil, network, keychainRefuse("NO_TERMINAL")
 	}
 	ok, err := term.Confirm("Type " + confirmWord + " to sign exactly the above, anything else declines: ")
@@ -511,8 +529,8 @@ func (deps keychainDeps) sign(label string, r KeychainSignRequest) (*KeychainSig
 	}
 	result := &KeychainSignResult{Key: key, Signatures: []KeychainSignature{}}
 	for _, it := range items {
-		reason := fmt.Sprintf("sign %s %x… for %s", it.purpose, it.digest[:8], r.Draft.LandlordName)
-		sig, err := deps.signer.SignSchnorr(label, reason, it.digest)
+		reason := fmt.Sprintf("sign %s %x… for %s [access: %s]", it.purpose, it.digest[:8], r.Draft.LandlordName, key.AccessPolicy)
+		sig, err := deps.signer.SignSchnorr(label, reason, it.digest, key.AccessPolicy)
 		if err != nil {
 			return nil, network, keychainFailure(err)
 		}
@@ -523,8 +541,8 @@ func (deps keychainDeps) sign(label string, r KeychainSignRequest) (*KeychainSig
 		result.Signatures = append(result.Signatures, KeychainSignature{it.purpose, digest, hex.EncodeToString(sig)})
 	}
 	if spend != nil {
-		reason := fmt.Sprintf("sign seal spend %s input %d for %s", spend.tx.TxHash(), spend.index, r.Draft.LandlordName)
-		der, err := deps.signer.SignECDSA(label, reason, spend.sighash)
+		reason := fmt.Sprintf("sign seal spend %s input %d for %s [access: %s]", spend.tx.TxHash(), spend.index, r.Draft.LandlordName, key.AccessPolicy)
+		der, err := deps.signer.SignECDSA(label, reason, spend.sighash, key.AccessPolicy)
 		if err != nil {
 			return nil, network, keychainFailure(err)
 		}

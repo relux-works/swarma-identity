@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"strings"
+
+	"github.com/relux-works/swarma-identity/internal/keypolicy"
 )
 
 // keychainOptions parses the long options of the G1-K commands with the same
@@ -61,7 +63,7 @@ func RunKeychain(ctx context.Context, args []string, stdout, stderr io.Writer, s
 func executeKeychain(_ context.Context, command string, args []string, deps keychainDeps) (string, any, *Failure) {
 	switch command {
 	case "keychain keygen":
-		o, f := keychainOptions(args, "label", "network")
+		o, f := keychainOptions(args, "label", "network", "access")
 		if f != nil {
 			return "", nil, f
 		}
@@ -69,7 +71,11 @@ func executeKeychain(_ context.Context, command string, args []string, deps keyc
 		if !ok {
 			network = "main"
 		}
-		result, f := KeychainKeygen(deps, o["label"], network)
+		access := keypolicy.Default
+		if value, present := o["access"]; present {
+			access = keypolicy.Policy(value)
+		}
+		result, f := KeychainKeygen(deps, o["label"], network, access)
 		return selectedNetwork(network), result, f
 	case "keychain sign":
 		o, f := keychainOptions(args, "label", "request")

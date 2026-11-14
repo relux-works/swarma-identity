@@ -40,9 +40,11 @@ The Mac-only Keychain grant key (G1-K) is a separate binary, because `swarma-ide
 ```sh
 # On the owner's Mac, using the Developer ID profile and signing identity:
 go run ./cmd/build-keychain-bundle /absolute/path/to/swarma-keychain-DevID.provisionprofile
-.temp/SwarmaKeychain.app/Contents/MacOS/swarma-keychain keychain keygen --label NAME --json
+.temp/SwarmaKeychain.app/Contents/MacOS/swarma-keychain keychain keygen --label NAME --access biometry-current-set --json > .temp/grant-key-NAME.public.json
 .temp/SwarmaKeychain.app/Contents/MacOS/swarma-keychain keychain sign --label NAME --request .temp/keychain-sign.json --json
 ```
+
+Keygen defaults to `biometry-current-set` unchanged; `--access biometry-any` survives fingerprint enrollment changes, while `--access biometry-or-passcode` also allows the device passcode/password. Every choice remains this-device-only. The public record and signing display include `access_policy`; changing policy requires a new key and an owner-key-signed `name_update`. See [the trade-offs and native inspection limit](docs/KEYCHAIN.md#access-policy).
 
 The node custodian must authorize online use and select the credential file. A scan occupies the node's shared scan resource. The matched UTXO total covers only the explicit range; it is not an entire-account or spendable balance. Coinbase outputs can be included. Mempool, history and name-encumbered outputs are excluded.
 
@@ -56,12 +58,12 @@ Scratch output goes to `.temp/`, which Git ignores.
 
 | Tool | Purpose and exact entry point | Output |
 | --- | --- | --- |
-| Go 1.26.8 | Build: command above. Test: `GOTOOLCHAIN=local GOMAXPROCS=2 go test -p 1 -parallel 1 ./...`. Static checks: `GOTOOLCHAIN=local GOMAXPROCS=2 go vet -p 1 ./...`. | Binary under `.temp/bin/`; redirect logs to `.temp/`. |
+| Go 1.26.8 | Build: command above. Test: `GOTOOLCHAIN=local GOMAXPROCS=2 go test -p 1 -parallel 2 ./...`. Static checks: `GOTOOLCHAIN=local GOMAXPROCS=2 go vet -p 1 ./...`. | Binary under `.temp/bin/`; redirect logs to `.temp/`. |
 | gofmt | Format: `gofmt -w cmd internal`. | Updates those source files. |
 | swarma-identity | The commands above and the offline `registration` commands below; every invocation requires `--json`. | One JSON envelope on stdout; fixed bounded diagnostics on stderr. |
 | swarma-keychain | darwin/cgo only: `keychain keygen`, `keychain sign`, `value build` ([docs/KEYCHAIN.md](docs/KEYCHAIN.md)). | One JSON envelope on stdout. The signing display and the confirmation use `/dev/tty`. |
 | Developer ID bundle (macOS) | `go run ./cmd/build-keychain-bundle PROFILE [OUTPUT.app]` builds the release signer, embeds the owner-supplied provisioning profile, signs with the Relux Works Developer ID Application identity and runs `codesign --verify --strict`. See [the recipe and Mac acceptance gate](docs/KEYCHAIN.md#developer-id-signing-for-the-data-protection-keychain). | Default `.temp/SwarmaKeychain.app` and `.temp/SwarmaKeychain.entitlements.plist`. |
-| Keychain tests (macOS) | `security create-keychain -p PW "$RUNNER_TEMP/swarma-test-X.keychain-db"`, unlock it, then `SWARMA_KEYCHAIN_TEST_PATH=<that path> go test -tags keychaintest -run 'TestTestKeychain\|TestKeychainDarwin' ./internal/keychain/ ./internal/facade/`. The `keychaintest` tag is for tests only and never goes into release builds. | Throwaway test keychain only; never the login keychain. |
+| Keychain tests (macOS) | `security create-keychain -p PW "$RUNNER_TEMP/swarma-test-X.keychain-db"`, unlock it, then `SWARMA_KEYCHAIN_TEST_PATH=<that path> go test -tags keychaintest -p 1 -parallel 2 -run 'TestTestKeychain\|TestKeychainDarwin' ./internal/keychain/ ./internal/facade/`. The `keychaintest` tag is for tests only and never goes into release builds. | Throwaway test keychain only; never the login keychain. |
 
 Tests use published public BIP84 vectors and fake loopback RPC fixtures with disposable credentials. They never discover or contact a live node. A pruned-node fixture establishes that the adapter makes no historical-block calls; it does not establish live-node qualification. CI runs serial tests and static checks on macOS.
 

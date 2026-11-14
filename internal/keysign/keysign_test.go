@@ -23,6 +23,7 @@ import (
 
 	"github.com/relux-works/swarma-identity/internal/keychain"
 	"github.com/relux-works/swarma-identity/internal/keychain/keychainfake"
+	"github.com/relux-works/swarma-identity/internal/keypolicy"
 )
 
 // The BIP-340 signing vectors: every published vector that carries a secret
@@ -395,7 +396,7 @@ func (r *countingReader) Read(p []byte) (int, error) {
 func TestKeygenRefusesExistingLabel(t *testing.T) {
 	store := keychainfake.New()
 	first := &countingReader{data: mustHex(t, vectors[1].secret)}
-	pub, err := NewWithStore(store, first).Keygen("grant-a")
+	pub, err := NewWithStore(store, first).Keygen("grant-a", keypolicy.Default)
 	_, want := btcec.PrivKeyFromBytes(mustHex(t, vectors[1].secret))
 	if err != nil || !bytes.Equal(pub, want.SerializeCompressed()) {
 		t.Fatalf("positive control: %v", err)
@@ -405,7 +406,7 @@ func TestKeygenRefusesExistingLabel(t *testing.T) {
 	}
 	before := len(store.Events)
 	second := &countingReader{data: mustHex(t, vectors[2].secret)}
-	if _, err := NewWithStore(store, second).Keygen("grant-a"); !errors.Is(err, keychain.ErrExists) {
+	if _, err := NewWithStore(store, second).Keygen("grant-a", keypolicy.Default); !errors.Is(err, keychain.ErrExists) {
 		t.Fatalf("existing label: %v, want KEY_EXISTS", err)
 	}
 	for _, e := range store.Events[before:] {
@@ -419,11 +420,11 @@ func TestKeygenRefusesExistingLabel(t *testing.T) {
 	if s, _ := store.SecretOf("grant-a"); hex.EncodeToString(s[:]) != vectors[1].secret {
 		t.Fatal("existing item changed")
 	}
-	if _, err := NewWithStore(store, second).Keygen("Bad Label"); !errors.Is(err, keychain.ErrItem) {
+	if _, err := NewWithStore(store, second).Keygen("Bad Label", keypolicy.Default); !errors.Is(err, keychain.ErrItem) {
 		t.Fatal("invalid label admitted")
 	}
 	store.PreflightErr = keychain.ErrBiometry
-	if _, err := NewWithStore(store, second).Keygen("grant-b"); !errors.Is(err, keychain.ErrBiometry) || second.n != 0 {
+	if _, err := NewWithStore(store, second).Keygen("grant-b", keypolicy.Default); !errors.Is(err, keychain.ErrBiometry) || second.n != 0 {
 		t.Fatal("keygen continued without biometry")
 	}
 }
@@ -434,14 +435,14 @@ func TestKeygenRefusesExistingLabel(t *testing.T) {
 func TestSignRefusesSwappedItem(t *testing.T) {
 	store := keychainfake.New()
 	s := NewWithStore(store, &countingReader{data: mustHex(t, vectors[1].secret)})
-	if _, err := s.Keygen("grant-a"); err != nil {
+	if _, err := s.Keygen("grant-a", keypolicy.Default); err != nil {
 		t.Fatal(err)
 	}
 	h := sha256.Sum256([]byte("digest"))
-	if _, err := s.SignSchnorr("grant-a", "reason", h[:]); err != nil {
+	if _, err := s.SignSchnorr("grant-a", "reason", h[:], keypolicy.Default); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SignECDSA("grant-a", "reason", h[:]); err != nil {
+	if _, err := s.SignECDSA("grant-a", "reason", h[:], keypolicy.Default); err != nil {
 		t.Fatal(err)
 	}
 	reads := 0
@@ -456,10 +457,10 @@ func TestSignRefusesSwappedItem(t *testing.T) {
 	var other [32]byte
 	copy(other[:], mustHex(t, vectors[2].secret))
 	store.Swap = &other
-	if _, err := s.SignSchnorr("grant-a", "reason", h[:]); !errors.Is(err, keychain.ErrItem) {
+	if _, err := s.SignSchnorr("grant-a", "reason", h[:], keypolicy.Default); !errors.Is(err, keychain.ErrItem) {
 		t.Fatalf("swapped item: %v", err)
 	}
-	if _, err := s.SignECDSA("grant-a", "reason", h[:]); !errors.Is(err, keychain.ErrItem) {
+	if _, err := s.SignECDSA("grant-a", "reason", h[:], keypolicy.Default); !errors.Is(err, keychain.ErrItem) {
 		t.Fatalf("swapped item: %v", err)
 	}
 }
@@ -511,39 +512,45 @@ func TestScratchClearedOnEveryReturn(t *testing.T) {
 		want error
 		run  func(*keychainfake.Store, *Signer) error
 	}{
-		{"keygen", nil, func(st *keychainfake.Store, s *Signer) error { _, err := s.Keygen("grant-b"); return err }},
+		{"keygen", nil, func(st *keychainfake.Store, s *Signer) error {
+			_, err := s.Keygen("grant-b", keypolicy.Default)
+			return err
+		}},
 		{"keygen-no-valid-scalar", keychain.ErrStore, func(st *keychainfake.Store, s *Signer) error {
-			_, err := NewWithStore(st, &countingReader{data: notScalar[:]}).Keygen("grant-b")
+			_, err := NewWithStore(st, &countingReader{data: notScalar[:]}).Keygen("grant-b", keypolicy.Default)
 			return err
 		}},
 		{"keygen-entropy-fails", keychain.ErrStore, func(st *keychainfake.Store, s *Signer) error {
-			_, err := NewWithStore(st, failingReader{}).Keygen("grant-b")
+			_, err := NewWithStore(st, failingReader{}).Keygen("grant-b", keypolicy.Default)
 			return err
 		}},
 		{"schnorr", nil, func(st *keychainfake.Store, s *Signer) error {
-			_, err := s.SignSchnorr("grant-a", "r", h[:])
+			_, err := s.SignSchnorr("grant-a", "r", h[:], keypolicy.Default)
 			return err
 		}},
-		{"ecdsa", nil, func(st *keychainfake.Store, s *Signer) error { _, err := s.SignECDSA("grant-a", "r", h[:]); return err }},
+		{"ecdsa", nil, func(st *keychainfake.Store, s *Signer) error {
+			_, err := s.SignECDSA("grant-a", "r", h[:], keypolicy.Default)
+			return err
+		}},
 		{"schnorr-auth-canceled", keychain.ErrCanceled, func(st *keychainfake.Store, s *Signer) error {
 			st.SecretErr = keychain.ErrCanceled
-			_, err := s.SignSchnorr("grant-a", "r", h[:])
+			_, err := s.SignSchnorr("grant-a", "r", h[:], keypolicy.Default)
 			return err
 		}},
 		{"ecdsa-swapped-item", keychain.ErrItem, func(st *keychainfake.Store, s *Signer) error {
 			var other [32]byte
 			copy(other[:], mustHex(t, vectors[2].secret))
 			st.Swap = &other
-			_, err := s.SignECDSA("grant-a", "r", h[:])
+			_, err := s.SignECDSA("grant-a", "r", h[:], keypolicy.Default)
 			return err
 		}},
 		{"schnorr-not-a-scalar", keychain.ErrItem, func(st *keychainfake.Store, s *Signer) error {
 			st.Swap = &notScalar
-			_, err := s.SignSchnorr("grant-a", "r", h[:])
+			_, err := s.SignSchnorr("grant-a", "r", h[:], keypolicy.Default)
 			return err
 		}},
 		{"schnorr-aux-entropy-fails", keychain.ErrStore, func(st *keychainfake.Store, s *Signer) error {
-			_, err := NewWithStore(st, failingReader{}).SignSchnorr("grant-a", "r", h[:])
+			_, err := NewWithStore(st, failingReader{}).SignSchnorr("grant-a", "r", h[:], keypolicy.Default)
 			return err
 		}},
 	}
@@ -551,7 +558,7 @@ func TestScratchClearedOnEveryReturn(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			store := keychainfake.New()
 			s := NewWithStore(store, &countingReader{data: mustHex(t, vectors[1].secret)})
-			if _, err := s.Keygen("grant-a"); err != nil {
+			if _, err := s.Keygen("grant-a", keypolicy.Default); err != nil {
 				t.Fatal(err)
 			}
 			seen = nil
@@ -647,11 +654,11 @@ func TestOwnedWorkingStateCleared(t *testing.T) {
 		run      func(*keychainfake.Store, *Signer) error
 	}{
 		{"ecdsa-signed", nil, false, append(slices.Clone(macced), "vs"), func(st *keychainfake.Store, s *Signer) error {
-			_, err := s.SignECDSA("grant-a", "r", h[:])
+			_, err := s.SignECDSA("grant-a", "r", h[:], keypolicy.Default)
 			return err
 		}},
 		{"schnorr-signed", nil, false, hashed, func(st *keychainfake.Store, s *Signer) error {
-			_, err := s.SignSchnorr("grant-a", "r", h[:])
+			_, err := s.SignSchnorr("grant-a", "r", h[:], keypolicy.Default)
 			return err
 		}},
 		{"schnorr-verify-refused", ErrSignature, false, hashed, func(st *keychainfake.Store, s *Signer) error {
@@ -662,17 +669,17 @@ func TestOwnedWorkingStateCleared(t *testing.T) {
 				clear(p)
 				return len(p), nil
 			})
-			_, err := NewWithStore(st, fault).SignSchnorr("grant-a", "r", h[:])
+			_, err := NewWithStore(st, fault).SignSchnorr("grant-a", "r", h[:], keypolicy.Default)
 			return err
 		}},
 		{"ecdsa-verify-refused", ErrSignature, false, append(slices.Clone(macced), "vs"), func(st *keychainfake.Store, s *Signer) error {
-			_, err := s.withKey("grant-a", "r", func(sc *scratch, _ *btcec.PublicKey) ([]byte, error) {
+			_, err := s.withKey("grant-a", "r", keypolicy.Default, func(sc *scratch, _ *btcec.PublicKey) ([]byte, error) {
 				return signECDSA(sc, foreign, h[:])
 			})
 			return err
 		}},
 		{"panic-after-signing", nil, true, append(append(slices.Clone(macced), hashed...), "vs"), func(st *keychainfake.Store, s *Signer) error {
-			_, err := s.withKey("grant-a", "r", func(sc *scratch, pub *btcec.PublicKey) ([]byte, error) {
+			_, err := s.withKey("grant-a", "r", keypolicy.Default, func(sc *scratch, pub *btcec.PublicKey) ([]byte, error) {
 				_, e1 := signECDSA(sc, pub, h[:])
 				_, e2 := signSchnorr(sc, pub, h[:])
 				panic(errors.Join(errors.New("injected after signing"), e1, e2))
@@ -681,11 +688,11 @@ func TestOwnedWorkingStateCleared(t *testing.T) {
 		}},
 		{"schnorr-auth-canceled", keychain.ErrCanceled, false, nil, func(st *keychainfake.Store, s *Signer) error {
 			st.SecretErr = keychain.ErrCanceled
-			_, err := s.SignSchnorr("grant-a", "r", h[:])
+			_, err := s.SignSchnorr("grant-a", "r", h[:], keypolicy.Default)
 			return err
 		}},
 		{"schnorr-aux-entropy-fails", keychain.ErrStore, false, nil, func(st *keychainfake.Store, s *Signer) error {
-			_, err := NewWithStore(st, failingReader{}).SignSchnorr("grant-a", "r", h[:])
+			_, err := NewWithStore(st, failingReader{}).SignSchnorr("grant-a", "r", h[:], keypolicy.Default)
 			return err
 		}},
 	}
@@ -693,7 +700,7 @@ func TestOwnedWorkingStateCleared(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			store := keychainfake.New()
 			s := NewWithStore(store, &countingReader{data: mustHex(t, vectors[1].secret)})
-			if _, err := s.Keygen("grant-a"); err != nil {
+			if _, err := s.Keygen("grant-a", keypolicy.Default); err != nil {
 				t.Fatal(err)
 			}
 			seen, used = nil, nil
@@ -805,6 +812,17 @@ func TestHashCodeHasNoSecretLocals(t *testing.T) {
 		}
 		if !slices.Equal(names, append([]string{}, want...)) {
 			t.Errorf("%s declares locals %v, want only %v", key, names, want)
+		}
+	}
+}
+
+// Claim: invalid access policies refuse before even opening the store or consuming entropy, independent of the CLI.
+func TestKeygenUnknownAccessBeforeStore(t *testing.T) {
+	reader := &countingReader{data: mustHex(t, vectors[1].secret)}
+	s := &Signer{store: func() (keychain.Store, error) { t.Fatal("unknown policy opened store"); return nil, nil }, entropy: reader}
+	for _, access := range []keypolicy.Policy{"unknown", ""} {
+		if pub, err := s.Keygen("grant-a", access); !errors.Is(err, keypolicy.ErrUnknown) || pub != nil || reader.n != 0 {
+			t.Fatalf("unknown policy = %x, %v", pub, err)
 		}
 	}
 }

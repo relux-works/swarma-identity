@@ -8,6 +8,8 @@ package keychain
 int sk_open(const char *path);
 int sk_delete(const char *label);
 int sk_last_read_wiped(void);
+int sk_test_access(const char *label, unsigned char flags);
+int sk_test_legacy(const char *label);
 */
 import "C"
 
@@ -57,3 +59,17 @@ func Delete(label string) error {
 // was observed all zero after it was wiped and before it was released. Only
 // the keychaintest build has it.
 func LastReadWiped() bool { return C.sk_last_read_wiped() == 1 }
+
+// setTestAccess changes only policy metadata in the guarded test keychain.
+func setTestAccess(label string, flags byte) error {
+	cl := C.CString(label)
+	defer C.free(unsafe.Pointer(cl))
+	return statusErr(C.sk_test_access(cl, C.uchar(flags)))
+}
+
+// setTestLegacy models a pre-policy two-item key without touching release items.
+func setTestLegacy(label string) error {
+	cl := C.CString(label)
+	defer C.free(unsafe.Pointer(cl))
+	return statusErr(C.sk_test_legacy(cl))
+}
