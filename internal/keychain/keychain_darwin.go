@@ -247,6 +247,7 @@ static int sk_control_valid(unsigned long flags) {
 #ifdef SK_TESTMODE
 // Test-only metadata mutation, confined to the guarded throwaway keychain.
 static int sk_test_metadata(const char *label, const char *service, const unsigned char *bytes, CFIndex n) {
+	if (sk_test_kc == NULL) return SK_STORE;
 	CFMutableDictionaryRef q = sk_query(label, service, 0);
 	CFMutableDictionaryRef attrs = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
 	CFDataRef data = CFDataCreate(NULL, bytes, n);
@@ -335,6 +336,10 @@ static int sk_secret(const char *label, const char *reason, unsigned char *out32
 #ifdef SK_TESTMODE
 	sk_test_read_wiped = 0;
 #endif
+	unsigned long public_flags = 0;
+	int policy_rc = sk_access(label, &public_flags);
+	if (policy_rc != SK_OK) return policy_rc;
+	if (public_flags != flags) return SK_POLICY;
 	@autoreleasepool {
 		CFMutableDictionaryRef q = sk_query(label, SK_SERVICE, 0);
 		CFDictionarySetValue(q, kSecReturnData, kCFBooleanTrue);
@@ -493,13 +498,6 @@ func (darwinStore) Secret(label, reason string, dst *[32]byte, access keypolicy.
 	flags, err := access.SecurityFlags()
 	if err != nil {
 		return nil, err
-	}
-	recorded, err := (darwinStore{}).Access(label)
-	if err != nil {
-		return nil, err
-	}
-	if recorded != access {
-		return nil, keypolicy.ErrMismatch
 	}
 	if !ValidLabel(label) || reason == "" {
 		return nil, ErrItem
