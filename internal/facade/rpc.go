@@ -130,6 +130,15 @@ func (c *Client) call(ctx context.Context, method string, params []any) (json.Ra
 	switch method {
 	case "getnetworkinfo", "getblockchaininfo", "getblockhash", "getbestblockhash", "name_show":
 		allowed = true
+	case "gettxout":
+		// Core 28: [txid, n, include_mempool]. Never hide a mempool seal
+		// spend by reading only the chain UTXO set.
+		if len(params) == 3 {
+			txid, txOK := params[0].(string)
+			_, nOK := params[1].(uint32)
+			mempool, mOK := params[2].(bool)
+			allowed = txOK && hashValid(txid) && nOK && mOK && mempool
+		}
 	case "scantxoutset":
 		if len(params) == 2 {
 			action, ok := params[0].(string)
@@ -241,7 +250,9 @@ func (c *Client) call(ctx context.Context, method string, params []any) (json.Ra
 		return nil, fail("RPC_REFUSED")
 	}
 	result, exists := obj["result"]
-	if !exists || bytes.Equal(bytes.TrimSpace(result), []byte("null")) || resp.StatusCode != http.StatusOK {
+	// gettxout's successful null means missing OR spent (including mempool
+	// spends); all other admitted reads still require a non-null result.
+	if !exists || (method != "gettxout" && bytes.Equal(bytes.TrimSpace(result), []byte("null"))) || resp.StatusCode != http.StatusOK {
 		return nil, fail("PROVIDER_PROTOCOL")
 	}
 	return result, nil

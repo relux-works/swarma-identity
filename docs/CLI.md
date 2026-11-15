@@ -98,6 +98,17 @@ This is the matched current UTXO total, including immature coinbase when present
 
 `grant draft`, `grant consent` and `grant sign` issue a Grant v3 with a LIP-0013 `swarma-trust-contract/1` contract in two phases without any private key in the process. Their schemas, the signing flow, the seal ledger and their refusals are in [GRANT.md](GRANT.md). `grant ledger-recover --seal-ledger FILE --json` (offline) merges a seal-ledger temporary file left by an interrupted update back into the ledger; until it runs, draft and sign refuse as `LEDGER_FILE`. Named grant refusals exit 3.
 
+`grant seal --config FILE --request FILE --json` builds one even-y grant-key
+P2PKH seal plus separate native P2WPKH funding change. `grant anchor` with the
+same flags revalidates exact signed grant/contract bytes, reads the current
+issuer and checks the confirmed, unspent seal with explicit
+`gettxout [txid,vout,true]` before building the 72-byte LIP-0005 frame. Core's
+successful null is admitted only for this RPC and becomes
+`SEAL_MISSING_OR_SPENT`; every other admitted read keeps its non-null rule.
+Both return unsigned transaction/PSBTv0 plans with `dry_run:true`; there is no
+signing or broadcast flag. Requests, public funding pins, exact output order,
+fees, candidate-frame verification and named refusals are in [GRANT.md](GRANT.md).
+
 ## Offline Nostr profiles
 
 These two commands accept `--request FILE --json` only, without `--config`, `--mode`, relay, signing or output-file options. They read no ambient configuration, key or timestamp and perform no network operations. Their envelope `network` is always `""`; `command` is `nostr profile-prepare` or `nostr profile-verify`.
@@ -148,7 +159,7 @@ Following the pinned [NIP-01 serialization rule](https://github.com/nostr-protoc
 
 ## Bounds and refusals
 
-Ordinary operations are bounded by 15 seconds total, five seconds per RPC. A scan has a 300-second total bound: preflight at most ten seconds, one scan RPC at most 285 seconds, and at most five seconds for post-scan observation. Responses are bounded by 4 MiB and 128 sequential RPC calls. No automatic retry, scan status/abort, wallet import/rescan, signing, transaction or lifecycle RPC is available.
+Ordinary operations are bounded by 15 seconds total, five seconds per RPC. A scan has a 300-second total bound: preflight at most ten seconds, one scan RPC at most 285 seconds, and at most five seconds for post-scan observation. Responses are bounded by 4 MiB and 128 sequential RPC calls. No automatic retry, scan status/abort, wallet import/rescan, transaction construction/signing/broadcast or lifecycle RPC is available. Grant transaction construction is local; `gettxout` is a current-output read only, with explicit mempool inclusion.
 
 Every result has `schema:"swarma-identity/result/1",ok,command,network,result,error`. Success has `error:null`. Failure has `result:null` and `error:{code,message,retryable}`. Messages are fixed, sanitized text. `command` and `network` are empty strings when no valid selection could be established; arbitrary input is never echoed.
 

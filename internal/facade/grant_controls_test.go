@@ -98,6 +98,21 @@ func TestGrantPlantedControls(t *testing.T) {
 		name, pkg, file, before, after, test, diagnostic string
 		survives                                         bool
 	}{
+		{"anchor-no-confirmation-check", "facade", "grant_transaction.go",
+			"if confirmations == 0 {", "if false {",
+			"^TestGrantAnchorSealPrechecks$", "want SEAL_UNCONFIRMED", false},
+		{"anchor-no-seal-key-check", "facade", "grant_transaction.go",
+			"if gotScript != script {", "if false {",
+			"^TestGrantAnchorSealPrechecks$", "want SEAL_KEY_MISMATCH", false},
+		{"anchor-no-pointer-check", "facade", "grant_transaction.go",
+			"m.Locator.Type != oplocator.LocationBlob || hex.EncodeToString(m.Locator.Pointer) != id", "m.Locator.Type != oplocator.LocationBlob",
+			"^TestGrantAnchorFrameGoldenAndRefusals$", "want ANCHOR_FRAME_LOCATOR", false},
+		{"seal-no-denomination-floor", "facade", "grant_transaction.go",
+			"r.AmountSat < minGrantSealAtoms || !amountValid(r.AmountSat)", "!amountValid(r.AmountSat)",
+			"^TestGrantTransactionAmountBoundaries$", "want SEAL_AMOUNT", false},
+		{"anchor-chain-only-read", "facade", "grant_transaction.go",
+			`"gettxout", []any{point.TxID, point.Vout, true}`, `"gettxout", []any{point.TxID, point.Vout, false}`,
+			"^TestGrantAnchorSealPrechecks$", "command refused: exit 3", false},
 		{"no-consent-signature", "facade", "grant.go",
 			"if !sigValid(d.GranteeKey, e.ID, e.Sig) {", "if false {",
 			"^TestGrantConsentSignerNegatives$", "want CONSENT_SIGNATURE", false},

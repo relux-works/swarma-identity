@@ -49,7 +49,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, deps keyc
 	f := fail("BAD_INPUT")
 	if len(args) >= 2 {
 		switch args[0] + " " + args[1] {
-		case "node health", "name show", "identity show", "address derive", "balance watch", "nostr profile-prepare", "nostr profile-verify", "grant draft", "grant consent", "grant sign", "grant ledger-recover":
+		case "node health", "name show", "identity show", "address derive", "balance watch", "nostr profile-prepare", "nostr profile-verify", "grant draft", "grant consent", "grant sign", "grant ledger-recover", "grant seal", "grant anchor":
 			e.Command = args[0] + " " + args[1]
 			e.Network, e.Result, f = execute(ctx, e.Command, args[2:])
 		case "registration account-pin", "registration reserve", "registration reveal", "registration request", "registration check-result":
@@ -165,6 +165,18 @@ func execute(ctx context.Context, command string, args []string) (string, any, *
 	var scanRequest ScanRequest
 	var draftRequest GrantDraftRequest
 	var signRequest GrantSignRequest
+	var sealRequest GrantSealRequest
+	var anchorRequest GrantAnchorRequest
+	if command == "grant seal" {
+		if f := inputFile(requestPath, &sealRequest); f != nil {
+			return "", nil, f
+		}
+	}
+	if command == "grant anchor" {
+		if f := inputFile(requestPath, &anchorRequest); f != nil {
+			return "", nil, f
+		}
+	}
 	if command == "grant draft" {
 		if f := inputFile(requestPath, &draftRequest); f != nil {
 			return "", nil, f
@@ -226,6 +238,12 @@ func execute(ctx context.Context, command string, args []string) (string, any, *
 		return network, result, f
 	case "grant sign":
 		result, f := c.SignGrant(ctx, signRequest, ledgerPath)
+		return network, result, f
+	case "grant seal":
+		result, f := c.SealGrant(ctx, sealRequest)
+		return network, result, f
+	case "grant anchor":
+		result, f := c.AnchorGrant(ctx, anchorRequest)
 		return network, result, f
 	}
 	return network, nil, fail("BAD_INPUT")

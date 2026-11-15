@@ -1,9 +1,13 @@
-# Trust-grant issuance: `grant draft`, `grant consent`, `grant sign`, `grant ledger-recover`
+# Trust-grant issuance and unsigned transactions
 
 These commands issue a Grant v3 (LIP-0004) whose contract is a
 `swarma-trust-contract/1` document (LIP-0013). They follow the general CLI
 rules in [CLI.md](CLI.md): `--json`, long options once, strict closed input
 files of at most 64 KiB, and exactly one result envelope.
+
+`grant seal` and `grant anchor` build unsigned transaction/PSBTv0 plans. There
+is no transaction signing or broadcast flag: both always return `dry_run:true`.
+Keep funding and all private keys in the existing external wallet/signer.
 
 ## Key custody
 
@@ -20,6 +24,7 @@ test signer, and no product source file uses a signing or private-key API.
 
 | Step | Command or signer | Signs | Message (32 bytes) |
 | --- | --- | --- | --- |
+| 0 | `grant seal` (online preflight; unsigned build), then external wallet | nobody in this CLI | builds one seal; externally sign/broadcast and confirm before anchoring |
 | 1 | `grant draft` (online) | nobody | builds the contract, the v3 fields and the consent template |
 | 2 | grantee's signer | grantee key | `consent_event_id`: the NIP-01 id of the kind-8181 consent event |
 | 3 | `grant consent` (offline) | nobody | verifies the consent and outputs the signed event |
@@ -27,6 +32,11 @@ test signer, and no product source file uses a signing or private-key API.
 | 5 | `grant sign` without `grant_sig` (online) | nobody | returns stage `grant_hash` with the canonical unsigned grant |
 | 6 | landlord's signer | landlord grant key | `grant_signing_hash`: SHA-256(`swarma-grant-v3` ‖ canonical grant) |
 | 7 | `grant sign` with `grant_sig` (online) | nobody | returns stage `signed`: the signed grant, `grant_id` and the commitment |
+| 8 | `grant anchor` (online preflight; unsigned build) | nobody | checks the current seal and builds the per-grant issuance transaction |
+
+After step 8 an external funding-wallet signer must review, sign and publish
+the issuance. A verifier must observe it confirmed on its own node. Neither
+an unsigned plan nor the seal pre-check makes a grant live.
 
 The grant signing hash cannot be produced at draft time. The canonical v3
 grant contains the consent event with its signature and `landlord_sig`
@@ -332,13 +342,180 @@ signs with `aux_rand` of 32 zero bytes, as the LIP-0013 vectors do, and it
 reproduces the BIP-340 vectors. It is never the default, and the binary does
 not import it.
 
+## `grant seal --config FILE --request FILE --json`
+
+```json
+{
+  "schema": "swarma-trust/seal/1",
+  "network": "regtest",
+  "landlord_name": "id/landlord",
+  "issuer_key": "<64 lowercase hex x-only public grant key>",
+  "amount_sat": 100000,
+  "funding": {
+    "script_hex": "0014<40 lowercase hex>",
+    "inputs": [{"txid":"<64 lowercase hex>","vout":0,"prev_tx_hex":"<full public parent transaction hex>"}],
+    "fee_rate_sat_vbyte": 2
+  }
+}
+```
+
+The independently supplied `issuer_key` must equal the active landlord's
+grant key. The selected loopback node must pass the existing Core **280000**,
+network, genesis and sync checks. Only `main` and `regtest` with the pinned
+genesis are admitted. A missing/expired landlord preserves the normal name
+refusal; a non-landlord is `LANDLORD_NOT_V3`, a changed key is
+`LANDLORD_KEY_MISMATCH`.
+
+The transaction has version 2, locktime 0, unsigned inputs with sequence
+`0xfffffffe`, and exactly two outputs in order:
+
+1. `amount_sat` to P2PKH of the **even-y compressed** grant key (`02 || issuer_key`).
+2. Funding change to the explicitly pinned `funding.script_hex`.
+
+Creation requires `amount_sat >= 100000` and no more than 21 million NMC in
+atoms. LIP-0004 specifies the seal's key/script, confirmation and unspent
+requirements, but **does not give a numeric denomination**. The 100000-atom
+creation floor follows its pinned implementation profile, retained in the
+repository's rental dependency at `7ea1800ed187`, `grant_pool.go`'s refill
+template. It is not a consensus minimum. This command creates one seal per
+request; it does not maintain or reserve a seal pool.
+
+Result: `dry_run,transaction,seal,issuer_key,observed_tip`. `seal` is the
+unsigned transaction's `{txid,vout:0}`. The exact native witness funding
+template keeps that txid stable when only witnesses are added; an external
+signer must preserve the entire transaction. Independently check the final
+outpoint before using it in `grant draft`.
+
+### Public funding and unsigned transaction results
+
+Both new commands use the same `funding` object. Supply 1..16 distinct
+outpoints and their complete public parent transactions. Each parent is
+decoded and reserialized exactly, its txid checked, and the selected output
+must have positive value and exactly the pinned **native P2WPKH** script.
+No name-prefixed, P2PKH, arbitrary or grant-seal input is admitted. The anchor
+also rejects its precise seal outpoint independently of the parent facts.
+Funding and change use the same pin, separate from the grant's P2PKH script
+(LIP-0004 section 6). No wallet is discovered, imported, unlocked or called;
+the reserved `watch_wallet` config enables no funding capability.
+
+`fee_rate_sat_vbyte` is explicit, 1..1000 NMC atoms/vB on either network.
+The fee is the rate times a conservative signed vsize: the full stripped
+transaction, witness marker/flag and at most 108 witness bytes per funding
+input, rounded up. This includes the complete anchor frame. Signed size is
+capped at 4096 vbytes and change must be at least 1000 atoms. Input sums are
+bounded at 21 million NMC. The reserved fee may exceed the final fee rate
+times actual signed size; it is not a node fee estimate or relay guarantee.
+
+`transaction` contains `unsigned_tx_hex,unsigned_txid,psbt_b64,outputs,fee_sat,
+fee_rate_sat_vbyte,maximum_signed_vbytes,required_review`. `outputs` lists
+`vout,amount_sat,script_hex,role` and agrees exactly with the wire bytes. The
+PSBTv0 carries the same unsigned transaction, complete parents, matching
+witness UTXOs and `SIGHASH_ALL`; it contains no signatures or key origins.
+Existing external wallet signers must independently establish ownership,
+derivations, current funding spendability, reservations and fee policy.
+Parent bytes establish neither current UTXO state nor owner authorization.
+
+## `grant anchor --config FILE --request FILE --json`
+
+```json
+{
+  "schema": "swarma-trust/anchor/1",
+  "signed_grant_b64": "<exact canonical signed_grant_b64 from grant sign>",
+  "contract_b64": "<exact contract_b64 from grant sign>",
+  "funding": {
+    "script_hex": "0014<40 lowercase hex>",
+    "inputs": [{"txid":"<64 lowercase hex>","vout":0,"prev_tx_hex":"<full public parent transaction hex>"}],
+    "fee_rate_sat_vbyte": 2
+  }
+}
+```
+
+Base64 is canonical padded standard Base64, with no whitespace, decoding to
+1..32768 bytes per field (the whole request still fits 64 KiB). The command
+revalidates canonical Grant v3 bytes, the public grant/consent/landlord
+signatures and the existing LIP-0013 contract binding. It checks network and
+genesis pins, the active agent/landlord binding and current issuer key.
+
+Before building, it calls exactly
+`gettxout [grant.seal.txid, grant.seal.vout, true]` on the selected node.
+The explicit `true` includes mempool spends; a chain-only read could falsely
+admit an already-revoked seal. It requires at least **one confirmation**,
+`scriptPubKey.type == "pubkeyhash"`, actual standard P2PKH script bytes and
+exact equality to the even-y grant-key script. It validates Core's consumed
+response fields and exact amount, compares `bestblock` to the identity-read
+tip, and samples `getbestblockhash` again after `gettxout`.
+
+Core returns `null` for both missing and spent outputs, including outputs
+spent in the mempool. These share `SEAL_MISSING_OR_SPENT`; this read cannot
+honestly distinguish their histories. An unconfirmed seal is
+`SEAL_UNCONFIRMED`, a different script type is `SEAL_SCRIPT_TYPE`, and a
+P2PKH script for another key or odd-y point is `SEAL_KEY_MISMATCH`. The
+creation denomination floor is not imposed retroactively on seal reads.
+Malformed consumed fields give `PROVIDER_PROTOCOL`; changed endpoint tips
+give `SNAPSHOT_CHANGED`; RPC/auth/deadline failures retain their existing
+named codes. No failure returns a partial transaction.
+
+The transaction uses the funding template above and exactly two outputs:
+
+1. Zero atoms to the exact 72-byte LIP-0005 issuance frame:
+   `6a03534c014201<commitment:32>01<grant_id:32>`.
+2. Funding change to the separate funding pin.
+
+The commitment is LIP-0004 section 4's SHA-256 over its fixed ASCII prefix
+and decoded contract/consent/signature/grant-id bytes; the grant ID hashes
+the exact supplied canonical signed grant. No seal is spent. An optional
+`frame_hex` verifies an externally proposed public frame against these
+computed bytes; it cannot select alternate framing. Bare legacy, batch,
+torrent/no-locator, wrong pointer/commitment, unknown versions, non-direct
+pushes and trailing bytes refuse. Writers enforce the 83-byte relay-policy
+script ceiling; fresh issuance always writes the 72-byte frame.
+
+Result: `dry_run,transaction,grant_id,commitment,frame_hex,seal,observed_tip`.
+`seal` contains `point,confirmations,amount_sat,script_hex,include_mempool:true`.
+This is a current-node pre-check, not a grant verifier: no issuance is yet
+confirmed, no clock/window or durable rotation/closure history is assessed,
+and the mempool may change immediately after the observation. Endpoint tip
+equality does not guarantee an atomic snapshot (including A → B → A).
+The seal ledger is not read or modified; its one-seal-per-grant guard remains
+in `grant sign`. A seal spend revokes the grant; anchoring never spends it.
+
+### Transaction-building refusals
+
+In addition to the existing named node/grant/contract refusals:
+
+| Code (exit 3, `retryable:false`) | Meaning |
+| --- | --- |
+| `SEAL_AMOUNT` | Seal creation value is outside the profile bounds. |
+| `SEAL_MISSING_OR_SPENT`, `SEAL_UNCONFIRMED` | The selected seal is absent/spent or lacks one confirmation. |
+| `SEAL_SCRIPT_TYPE`, `SEAL_KEY_MISMATCH` | Wrong script type or grant-key binding. |
+| `FUNDING_POLICY`, `FEE_RATE` | Invalid separate native P2WPKH pin or fee rate. |
+| `FUNDING_INPUT`, `FUNDING_DUPLICATE_INPUT`, `FUNDING_PREVOUT` | Invalid input count/id, duplicate outpoint, or mismatched/malformed full parent. |
+| `FUNDING_SEAL_SCRIPT`, `FUNDING_SCRIPT_MISMATCH`, `ISSUANCE_SPENDS_SEAL` | Seal funding or a wrong funding script/outpoint. |
+| `FUNDING_AMOUNT`, `FUNDING_OR_DUST_RESERVE`, `PLAN_SIZE_BOUND` | Invalid/overflowing funding, insufficient fee/change reserve, or oversized plan. |
+| `ANCHOR_FRAME`, `ANCHOR_FRAME_SIZE`, `ANCHOR_FRAME_VERSION` | Malformed/legacy/noncanonical candidate, over 83 bytes, or unsupported framed version. |
+| `ANCHOR_FRAME_ACTION`, `ANCHOR_FRAME_LOCATOR`, `ANCHOR_FRAME_COMMITMENT` | Candidate action, defined locator/pointer, or commitment disagrees with this issuance. |
+
+Malformed closed request files, invalid schema/keys and noncanonical Base64
+remain `BAD_INPUT` (exit 2). Core versions other than 280000 remain
+`UNSUPPORTED_CAPABILITY`. Unknown locator types/lengths are malformed frames.
+Both operations have the existing 15-second total and five-second RPC
+deadlines, no retries and no signing/broadcast option.
+
+Source pins: swarma-link-spec **0.1.48**, commit
+`2012ac9155568af80d610bdf9b7683881a46e5cb`,
+[LIP-0004 sections 4–6](https://github.com/relux-works/swarma-link-spec/blob/2012ac9155568af80d610bdf9b7683881a46e5cb/lips/LIP-0004-landlord-grants.md),
+[LIP-0005 sections 1–4](https://github.com/relux-works/swarma-link-spec/blob/2012ac9155568af80d610bdf9b7683881a46e5cb/lips/LIP-0005-op-return-locator.md).
+The fixture's `gettxout` argument order, null/mempool semantics and response
+fields were checked against [Namecoin Core nc28.0 `gettxout`](https://github.com/namecoin/namecoin-core/blob/nc28.0/src/rpc/blockchain.cpp#L1090-L1164).
+These are source-checked loopback fixtures, not live Core qualification.
+
 ## Limits
 
-- **Seal not read on chain.** These commands do not check that the seal exists,
-  is confirmed, is unspent, or pays P2PKH to the grant key. The read fence has
-  no `gettxout`. Creating the seal and signing and broadcasting the issuance
-  transaction are planned as `grant seal` and `grant anchor`. `rental.Check`
-  verifies the seal on the verifier's node.
+- **Seal checked at anchor build time.** `grant draft` and `grant sign` still
+  check only the local seal ledger. `grant anchor` adds the confirmed,
+  unspent, mempool-inclusive P2PKH pre-check above. `grant seal` and
+  `grant anchor` build unsigned plans only; external signing/broadcast and
+  the verifier's confirmed issuance/seal observation remain required.
 - **Fixture node.** "Regtest" in the tests means a regtest-pinned loopback
   fixture node, not a Namecoin Core regtest daemon.
 - **Signer adapters.** The keyvault, Keychain and NIP-07 adapters are external.
