@@ -1,0 +1,67 @@
+name: Notarized release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.8'
+          cache: true
+      - name: Portable release gates and negative controls
+        run: python3 -m unittest discover -s scripts -p 'test_release*.py' -v
+      - name: Test tagged source
+        run: GOTOOLCHAIN=local GOMAXPROCS=2 go test -p 1 -parallel 2 ./...
+      - name: Build, sign, notarize, staple and verify
+        shell: bash
+        run: |
+          set +x
+          bash scripts/release-macos.sh
+        env:
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      - name: Publish verified assets through a draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +x
+          set -euo pipefail
+          # Recheck that the remote tag object has not moved during notarization.
+          expected="$(git rev-parse "$GITHUB_REF")"
+          remote="$(git ls-remote --refs origin "$GITHUB_REF")"
+          test "${remote%%[[:space:]]*}" = "$expected"
+          test "$(git rev-parse "${GITHUB_REF}^{commit}")" = "$GITHUB_SHA"
+          cd dist
+          shasum -a 256 -c SHA256SUMS
+          assets=(SwarmaKeychain_*.zip swarma-identity_*.tar.gz SHA256SUMS DESIGNATED-REQUIREMENT.txt)
+          test "${#assets[@]}" = 7
+          for asset in "${assets[@]}"; do test -f "$asset"; done
+          args=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then args+=(--prerelease); fi
+          # Never overwrite an existing release or publish a partial upload.
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" --verify-tag --draft \
+            --title "$GITHUB_REF_NAME" --generate-notes "${args[@]}"
+          gh release edit "$GITHUB_REF_NAME" --draft=false

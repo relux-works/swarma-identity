@@ -20,8 +20,10 @@ func TestArguments(t *testing.T) {
 		want options
 		bad  bool
 	}{
-		{[]string{"profile"}, options{"profile", ".temp/SwarmaKeychain.app"}, false},
-		{[]string{"profile with spaces", "output with spaces.app"}, options{"profile with spaces", "output with spaces.app"}, false},
+		{[]string{"profile"}, options{profile: "profile", bundle: ".temp/SwarmaKeychain.app"}, false},
+		{[]string{"profile with spaces", "output with spaces.app"}, options{profile: "profile with spaces", bundle: "output with spaces.app"}, false},
+		{[]string{"--build-only", "profile"}, options{profile: "profile", bundle: ".temp/SwarmaKeychain.app", buildOnly: true}, false},
+		{[]string{"--build-only"}, options{}, true},
 		{nil, options{}, true},
 		{[]string{"a", "b", "c"}, options{}, true},
 	} {
@@ -29,6 +31,41 @@ func TestArguments(t *testing.T) {
 		if (err != nil) != tc.bad || !tc.bad && got != tc.want {
 			t.Fatalf("arguments(%q) = %+v, %v", tc.args, got, err)
 		}
+	}
+}
+
+// Claim: release assembly reuses the bundle/profile contract but executes only
+// the native build, leaving all signing to the release workflow. Build errors
+// still refuse success; the executor is a recorder, not a macOS build witness.
+func TestBuildOnly(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "build", true: "build-failure"}[fail], func(t *testing.T) {
+			dir := t.TempDir()
+			profile, bundle := filepath.Join(dir, "profile"), filepath.Join(dir, "Output.app")
+			writeFixture(t, profile, "profile bytes")
+			var out, diag bytes.Buffer
+			calls := 0
+			code := run([]string{"--build-only", profile, bundle}, "darwin", &out, &diag, func(c command) error {
+				calls++
+				if c.name != "go" || !reflect.DeepEqual(c.args, []string{"build", "-o", filepath.Join(bundle, "Contents/MacOS/swarma-keychain"), "./cmd/swarma-keychain"}) {
+					t.Fatalf("unexpected command: %+v", c)
+				}
+				if fail {
+					return commandFailure{}
+				}
+				return nil
+			})
+			if calls != 1 || string(readFixture(t, filepath.Join(bundle, "Contents/embedded.provisionprofile"))) != "profile bytes" {
+				t.Fatal("assembly did not preserve the build/profile contract")
+			}
+			if fail {
+				if code != 7 || out.Len() != 0 {
+					t.Fatal("failed build reported success")
+				}
+			} else if code != 0 || diag.Len() != 0 || out.String() != "Built unsigned bundle: "+bundle+"\n" {
+				t.Fatalf("build-only: %d %q %q", code, out.String(), diag.String())
+			}
+		})
 	}
 }
 

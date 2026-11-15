@@ -21,3 +21,9 @@
 - Keychain access-policy qualification: public Security APIs do not expose the native ACL flags for independent readback. Signing reports this limit and checks authenticated policy metadata; metadata consistency does not establish actual flag equivalence. Hosted macOS CI covers flag construction and a file-keychain metadata round trip without biometry. Actual Touch ID/passcode/password and enrollment-change semantics for each policy still require the owner-signed hardware dry run.
 
 - Trust-contract `/2` depth-one re-delegation, child certification, notary history and executor admission remain outside the depth-zero slice (LIP-0014 at spec 0.1.48). The parser can check child syntax, but issuance and offline signature verification refuse children as `CONTRACT_DEPTH`. A future Mac Keychain `/2` adapter must display all fifteen members and exact scope bytes before it may sign; its current `/1` adapter refuses `/2` drafts. Task-specific unknown/duplicate-member and depth refusal codes differ from the draft LIP and are documented in `docs/GRANT.md`; broad LIP-0014 conformance remains unclaimed.
+- Release workflow qualification: the Linux producer cannot establish the native
+  macOS build/sign/notarize/staple/Gatekeeper/archive path, org-secret access or
+  GitHub draft/upload/publication. The keeper's first reviewed tag
+  `v0.1.0-rc.1` must exercise these fail-closed gates. This is pending execution,
+  not permission to bypass a failure; see README "RELEASING". The app is built
+  for the macos-latest runner's native architecture, not as a universal binary.

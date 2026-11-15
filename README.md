@@ -25,7 +25,7 @@ The CLI uses no private keys or signer. The grant commands only exchange digests
 
 ## Build and use
 
-Targets: macOS (darwin/arm64) and Linux (linux/amd64), Go 1.26.8. Go 1.26 is required by the imported `swarma-chain-lab/experiments/rental` module. From the repository root:
+CLI targets: macOS (darwin/arm64 and darwin/amd64) and Linux (linux/amd64 and linux/arm64), Go 1.26.8. Go 1.26 is required by the imported `swarma-chain-lab/experiments/rental` module. From the repository root:
 
 ```sh
 mkdir -p .temp/bin
@@ -124,3 +124,85 @@ keep local inputs, bundles and test captures under `.temp/`.
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+## RELEASING
+
+Distribute releases only through the [notarized GitHub Release workflow](.github/workflows/release.yml).
+A pushed `v*` tag builds its exact commit on `macos-latest`. All five organization
+secrets must be available to this repository: `MACOS_SIGN_P12` (base64 PKCS#12),
+`MACOS_SIGN_P12_PASSWORD`, `ASC_ISSUER_ID`, `ASC_KEY_ID`, and `ASC_KEY_P8` (PEM).
+Missing credentials stop the job; there is no unsigned release mode.
+
+The workflow imports the Developer ID certificate into a temporary keychain,
+builds `SwarmaKeychain.app` with the existing builder's `--build-only` mode,
+signs its executable before the bundle with hardened runtime, secure timestamp,
+and the [committed entitlements](release/macos/swarma-keychain.entitlements.plist),
+then submits a ZIP with `notarytool --wait`. Only Apple's explicit `Accepted`
+status permits stapling. The keychain, imported P12 and temporary ASC key file
+are deleted before publication can start.
+
+Release assets are:
+
+- `SwarmaKeychain_<tag>_darwin_<runner-arch>.zip`: the stapled app, created with
+  `ditto -c -k --keepParent`. The app targets the runner's native architecture;
+  it is not a universal binary.
+- `swarma-identity_<tag>_{darwin,linux}_{amd64,arm64}.tar.gz`: four CLI archives
+  with LICENSE, NOTICE and README. Both Darwin executables are Developer ID
+  signed and separately notarized. Standalone Mach-O executables cannot carry
+  stapled tickets; their tickets are registered with Apple's online service.
+- `SHA256SUMS` and `DESIGNATED-REQUIREMENT.txt`, captured from the verified app.
+
+Publication requires strict recursive signature verification, Gatekeeper
+`accepted` with `source=Notarized Developer ID`, a valid local stapled ticket,
+the exact committed designated requirement, and semantically identical plist
+entitlements (including value types and all keys). These gates run again after
+unpacking the final app ZIP. Native missing-ticket and portable deliberate
+requirement/entitlement/secret mismatches must be rejected. Assets are uploaded
+to a draft first; only a successful full upload is published. Existing releases
+are never overwritten. A failed upload can leave an unpublished draft: inspect
+it and resolve it before retrying; do not weaken gates or move the tag.
+
+For the first release, after the keeper's PR review, checks and signed landing:
+
+```sh
+git fetch origin main --tags
+git switch main
+git merge --ff-only origin/main
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+python3 scripts/release_checks.py pins
+python3 -m unittest discover -s scripts -p 'test_release*.py' -v
+git tag -s v0.1.0-rc.1 -m 'swarma-identity v0.1.0-rc.1'
+git verify-tag v0.1.0-rc.1
+git push origin refs/tags/v0.1.0-rc.1
+gh run list --workflow release.yml --branch v0.1.0-rc.1
+gh release view v0.1.0-rc.1
+```
+
+The tag command is a keeper step, not part of producer validation. Confirm the
+five org secrets' repository access before pushing it. Tags with a `-` suffix
+produce prereleases. Download all seven assets and run `shasum -a 256 -c
+SHA256SUMS`. On a Mac, unpack the app with `ditto -x -k`, then repeat the checks
+in [KEYCHAIN.md](docs/KEYCHAIN.md#releasing).
+
+**Unverified until the first real tag run:** macOS compilation, certificate
+import/identity availability, explicit requirement compilation and display,
+Apple signing/timestamps, ASC credentials/permissions, notarization, native
+missing-ticket rejection, stapling, Gatekeeper acceptance, archive ticket
+preservation and GitHub draft/upload/publication. Linux tests establish the
+portable comparison/pin/failure contracts and cross-compilation only. Release
+notarization does not qualify Touch ID, passcode or Keychain access policies.
+
+Release tooling (all portable commands run from the repository root):
+
+| Tool | Purpose and exact entry point | Output |
+| --- | --- | --- |
+| Python 3, standard library | `python3 scripts/release_checks.py pins`; `python3 -m unittest discover -s scripts -p 'test_release*.py' -v` | Gate verdicts on stdout/stderr; tests use disposable fixtures. |
+| Bash and Apple tools | `bash scripts/release-macos.sh` (tag workflow only); `bash -n scripts/release-macos.sh` for portable syntax validation | Verified assets in ignored `dist/`; temporary keychain/P8/P12 under a private `$RUNNER_TEMP/swarma-release.*`, removed on exit. |
+| GitHub CLI | Workflow: `gh release create TAG ASSETS... --verify-tag --draft`, then `gh release edit TAG --draft=false`; inspection: `gh release view TAG` | Draft uploads and published assets on GitHub Releases. |
+| actionlint 1.7.12 (optional validator) | `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/release.yml .github/workflows/ci.yml` | Diagnostics on stdout/stderr; use `.temp/` for local logs. |
+
+On the dev527 Linux producer host, source
+`/home/agent/Werkstatt/keeper-identity-release-dev/.goenv/env.sh` before **every**
+Go/gofmt command and set `TMPDIR` and `GOTMPDIR` to
+`/home/agent/.task-tmp/dev527`. This host-only environment is not used on GitHub
+runners. Never run `go telemetry` or `go env -w`.

@@ -13,7 +13,10 @@ import (
 	"strings"
 )
 
-type options struct{ profile, bundle string }
+type options struct {
+	profile, bundle string
+	buildOnly       bool
+}
 type command struct {
 	name string
 	args []string
@@ -21,10 +24,14 @@ type command struct {
 }
 
 func arguments(args []string) (options, error) {
-	if len(args) < 1 || len(args) > 2 {
-		return options{}, errors.New("Usage: go run ./cmd/build-keychain-bundle PROFILE [OUTPUT.app]")
+	buildOnly := len(args) > 0 && args[0] == "--build-only"
+	if buildOnly {
+		args = args[1:]
 	}
-	o := options{args[0], ".temp/SwarmaKeychain.app"}
+	if len(args) < 1 || len(args) > 2 {
+		return options{}, errors.New("Usage: go run ./cmd/build-keychain-bundle [--build-only] PROFILE [OUTPUT.app]")
+	}
+	o := options{profile: args[0], bundle: ".temp/SwarmaKeychain.app", buildOnly: buildOnly}
 	if len(args) == 2 {
 		o.bundle = args[1]
 	}
@@ -61,8 +68,12 @@ func run(args []string, platform string, stdout, stderr io.Writer, execute func(
 	}
 	commands := []command{
 		{"go", []string{"build", "-o", filepath.Join(o.bundle, "Contents/MacOS/swarma-keychain"), "./cmd/swarma-keychain"}, releaseEnvironment()},
-		{"codesign", []string{"--force", "--options", "runtime", "--entitlements", entitlements, "--sign", "Developer ID Application: Relux Works, LLC (262RZ595FP)", o.bundle}, nil},
-		{"codesign", []string{"--verify", "--strict", o.bundle}, nil},
+	}
+	if !o.buildOnly {
+		commands = append(commands, []command{
+			{"codesign", []string{"--force", "--options", "runtime", "--entitlements", entitlements, "--sign", "Developer ID Application: Relux Works, LLC (262RZ595FP)", o.bundle}, nil},
+			{"codesign", []string{"--verify", "--strict", o.bundle}, nil},
+		}...)
 	}
 	for _, c := range commands {
 		if err := execute(c); err != nil {
@@ -77,7 +88,11 @@ func run(args []string, platform string, stdout, stderr io.Writer, execute func(
 			return 1
 		}
 	}
-	fmt.Fprintf(stdout, "Signed bundle: %s\n", o.bundle)
+	if o.buildOnly {
+		fmt.Fprintf(stdout, "Built unsigned bundle: %s\n", o.bundle)
+	} else {
+		fmt.Fprintf(stdout, "Signed bundle: %s\n", o.bundle)
+	}
 	return 0
 }
 

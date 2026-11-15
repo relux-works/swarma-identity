@@ -348,3 +348,66 @@ hardware dry run before creating or rotating a real key. No such live key or
 | macOS CI, tag `keychaintest` | a throwaway file keychain made by `security create-keychain` in the job (never the login keychain): store round trip, duplicate label, path guard; the Keychain read result wiped before release; keygen → sign → PR 8 `grant sign` end to end |
 | macOS CI, release build | release-store preflight refuses on the runner (no biometry); a read-only lookup of a random label returns no item |
 | CI Build step | release `swarma-keychain` and `swarma-identity` binaries do not contain the test keychain selector (positive control: the `keychaintest` build does) |
+
+## RELEASING
+
+The local bundle builder above is for development and hardware qualification.
+Every distributable release goes through the tagged
+[GitHub Release workflow](../.github/workflows/release.yml); the complete
+keeper/tag procedure and secret formats are in [README](../README.md#releasing).
+
+`go run ./cmd/build-keychain-bundle --build-only PROFILE OUTPUT.app` reuses the
+existing bundle layout and native release environment, embeds the profile, and
+builds the executable without signing. The workflow compares its generated
+entitlements with the owner-supplied plist, then signs
+`Contents/MacOS/swarma-keychain` before signing the `.app`, using the committed
+plist, `--options runtime`, `--timestamp`, and an explicit committed requirement.
+It never uses `--deep` to sign. The two existing positional arguments still
+select the original local build/sign/verify recipe when `--build-only` is absent.
+
+The public profile and entitlement inputs live in `release/macos/`; their full
+owner-supplied SHA-256 pins are checked independently of the manifest by
+`scripts/release_checks.py pins`. The explicit
+[expected requirement](../release/macos/DESIGNATED-REQUIREMENT.txt) binds the
+bundle identifier, Apple trust anchor, Developer ID CA/leaf certificate
+extensions and team `262RZ595FP`. Both the inner executable and bundle must
+report exactly that requirement and exactly the committed entitlement values.
+Plist key order and XML/binary encoding do not matter; extra, missing, duplicate
+or differently typed entitlements refuse. A requirement change is a reviewed
+source change, never an automatic adoption of whatever a runner prints.
+
+The workflow first proves that `stapler validate` rejects the signed app with no
+local ticket (nonzero exit and the specific missing-ticket diagnostic). After
+`notarytool submit --wait` returns `Accepted`, it staples and verifies the app,
+runs deliberate requirement/entitlement mismatches against extracted signed
+metadata, zips it with `ditto -c -k --keepParent`, unpacks it, and verifies again.
+Any failure prevents publishing a GitHub Release. The native missing-ticket
+control is intentionally strict: an unexpected tool error is a failed control.
+
+For a downloaded release, with `SwarmaKeychain.app` unpacked on macOS:
+
+```sh
+mkdir -p .temp
+codesign --verify --strict --deep SwarmaKeychain.app
+spctl -a -t exec -vv SwarmaKeychain.app
+# Require accepted and source=Notarized Developer ID, not just any exit message.
+xcrun stapler validate SwarmaKeychain.app
+codesign -d -r- SwarmaKeychain.app > .temp/downloaded-requirement.txt
+python3 scripts/release_checks.py requirement release/macos/DESIGNATED-REQUIREMENT.txt .temp/downloaded-requirement.txt
+codesign -d --entitlements :- SwarmaKeychain.app > .temp/downloaded-entitlements.plist
+python3 scripts/release_checks.py entitlements release/macos/swarma-keychain.entitlements.plist .temp/downloaded-entitlements.plist
+```
+
+These commands need a matching reviewed source checkout for the committed
+expectations. `DESIGNATED-REQUIREMENT.txt` on the release is an audit asset;
+compare it with that source expectation rather than trusting a downloaded
+requirement to authorize itself. The app ZIP includes a stapled ticket; the two
+Darwin CLI archives contain signed, notarized bare executables whose tickets
+are online because Apple does not support stapling standalone Mach-O files.
+See [Apple's notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
+and [standalone-tool limitation](https://developer.apple.com/videos/play/wwdc2019/703/).
+
+The first tag run must still establish all native signing, notarization,
+Gatekeeper, ticket/ZIP and GitHub publication behavior. Linux validation does
+not establish these, and notarization does not replace the owner hardware dry
+run for biometric/passcode behavior described above.
