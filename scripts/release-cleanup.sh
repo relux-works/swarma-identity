@@ -14,6 +14,16 @@ if [[ -z "$work" && -z "$keychain" ]]; then exit 0; fi
 [[ ! -e "$work" || -d "$work" ]] || fail 'private workspace is not a directory'
 [[ ! -e "$keychain" || -f "$keychain" ]] || fail 'keychain is not a regular file'
 
+# Restore before deletion in BOTH the process trap and independent always step.
+# On failure retain the non-secret recovery state and keychain for a retry,
+# while removing loose credentials. Never publish after failed restoration.
+if python3 "$(dirname "$0")/release_keychains.py" restore "$work"; then
+  :
+else
+  rm -f "$work/AuthKey.p8" "$work/certificate.p12" "$work/keychain-password"
+  fail 'original user keychain state restoration failed; recovery state retained'
+fi
+
 status=0
 if [[ -f "$keychain" ]]; then
   if security delete-keychain "$keychain" >/dev/null 2>&1; then

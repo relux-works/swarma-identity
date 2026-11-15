@@ -144,7 +144,13 @@ signing process records only its non-secret work/keychain paths in `GITHUB_ENV`.
 An independent `if: always()` cleanup step uses those paths before publication,
 including after process termination. Cleanup is idempotent; its failure blocks
 publication, and success cannot clear an earlier failed signing gate. The
-process's EXIT/INT/TERM traps remain as defense in depth.
+process's EXIT/INT/TERM traps remain as defense in depth. After unlock, the
+workflow saves the original user search list and default keychain as non-secret
+paths in private `keychain-state.json`, then prepends the temporary keychain
+before codesign. The job does not change the default for signing. Both cleanup
+paths restore the saved search list and default before deletion. A restoration
+failure blocks publication, removes loose P8/P12/password files and retains the
+keychain plus non-secret state for the independent cleanup retry.
 
 Release assets are:
 
@@ -189,7 +195,7 @@ produce prereleases. Download all seven assets and run `shasum -a 256 -c
 SHA256SUMS`. On a Mac, unpack the app with `ditto -x -k`, then repeat the checks
 in [KEYCHAIN.md](docs/KEYCHAIN.md#releasing).
 
-**Unverified until the first real tag run:** macOS compilation, certificate
+**Requiring native qualification on the release candidate:** macOS compilation, certificate
 import/identity availability, explicit requirement compilation and display,
 Apple signing/timestamps, ASC credentials/permissions, notarization, native
 missing-ticket rejection, stapling, Gatekeeper acceptance, archive ticket
@@ -203,7 +209,7 @@ Release tooling (all portable commands run from the repository root):
 
 | Tool | Purpose and exact entry point | Output |
 | --- | --- | --- |
-| Python 3, standard library | `python3 scripts/release_checks.py pins`; `python3 -m unittest discover -s scripts -p 'test_release*.py' -v` | Gate verdicts on stdout/stderr; tests use disposable fixtures. |
+| Python 3, standard library | `python3 scripts/release_checks.py pins`; `python3 -m unittest discover -s scripts -p 'test_release*.py' -v`; macOS workflow state: `python3 scripts/release_keychains.py configure WORK KEYCHAIN` / `restore WORK` | Gate verdicts on stdout/stderr; tests use disposable fixtures. |
 | Bash and Apple tools | `bash scripts/release-macos.sh` (tag workflow only); `bash -n scripts/release-macos.sh` and `bash -n scripts/release-cleanup.sh` for portable syntax validation | Verified assets in ignored `dist/`; temporary keychain/P8/P12 under a private `$RUNNER_TEMP/swarma-release.*`, removed on exit. |
 | GitHub CLI | Workflow: `gh release create TAG ASSETS... --verify-tag --draft`, then `gh release edit TAG --draft=false`; inspection: `gh release view TAG` | Draft uploads and published assets on GitHub Releases. |
 | actionlint 1.7.12 (optional validator) | `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/release.yml .github/workflows/ci.yml` | Diagnostics on stdout/stderr; use `.temp/` for local logs. |

@@ -54,6 +54,8 @@ key_id="$ASC_KEY_ID"
 security create-keychain -p "$keychain_password" "$keychain"
 security set-keychain-settings -lut 21600 "$keychain"
 security unlock-keychain -p "$keychain_password" "$keychain"
+# Save non-secret user paths before prepending this keychain for codesign.
+python3 "$ROOT/scripts/release_keychains.py" configure "$work" "$keychain"
 security import "$work/certificate.p12" -k "$keychain" -P "$MACOS_SIGN_P12_PASSWORD" -T /usr/bin/codesign > "$work/import.log" 2>&1
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" > "$work/partition.log" 2>&1
 rm "$work/certificate.p12" "$work/keychain-password"

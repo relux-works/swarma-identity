@@ -387,6 +387,13 @@ paths for an independent `always()` cleanup step before publication. That step
 retries cleanup after a killed signing process or first cleanup failure; its
 failure blocks publication and its success cannot clear an earlier failed gate.
 The EXIT/INT/TERM trap uses the same idempotent helper as defense in depth.
+After unlocking the temporary keychain, the workflow saves the original user
+search-list/default paths in private `keychain-state.json`, then prepends the
+temporary keychain to the user search list before codesign. It does not change
+the default during signing. Both cleanup paths restore the search list and
+default before deleting the temporary keychain. If restoration fails, they
+retain the keychain/recovery paths for retry, remove loose credential files and
+fail closed.
 The native missing-ticket control is intentionally strict: an unexpected tool error is a failed control.
 
 For a downloaded release, with `SwarmaKeychain.app` unpacked on macOS:
@@ -412,7 +419,7 @@ are online because Apple does not support stapling standalone Mach-O files.
 See [Apple's notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
 and [standalone-tool limitation](https://developer.apple.com/videos/play/wwdc2019/703/).
 
-The first tag run must still establish all native signing, notarization,
+Each release candidate's tag run must establish native signing, notarization,
 Gatekeeper, ticket/ZIP and GitHub publication behavior. Linux validation does
 not establish these, and notarization does not replace the owner hardware dry
 run for biometric/passcode behavior described above.
