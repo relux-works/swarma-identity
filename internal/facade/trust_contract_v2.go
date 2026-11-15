@@ -111,7 +111,9 @@ func canonicalV2Value(d *json.Decoder, depth int) ([]byte, string) {
 				if err != nil || !ok || !printableASCII(key) {
 					return nil, "CONTRACT_ENCODING"
 				}
-				if seen[key] {
+				// Rule 1 owns the top-level member set. Nested duplicates are
+				// structure owned by rule 9, after rules 2–8 (LIP-0014 3.1).
+				if depth == 0 && seen[key] {
 					return nil, "CONTRACT_FIELD"
 				}
 				seen[key] = true

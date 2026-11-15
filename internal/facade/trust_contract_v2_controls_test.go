@@ -16,6 +16,7 @@ func TestTrustContractV2PlantedControls(t *testing.T) {
 	o.goCommand(t, "baseline-build", "test", "-mod=readonly", "-p", "1", "-c", "-o", baseline, "./internal/facade")
 	t.Cleanup(func() { os.Remove(baseline) })
 	cases := []struct{ name, file, before, after, test, diagnostic string }{
+		{"restore-premature-nested-duplicate", "trust_contract_v2.go", "if depth == 0 && seen[key] {", "if seen[key] {", "^TestRev362FreeHuntPrecedence$", `want "CONTRACT_PROFILE"`},
 		{"allow-depth-1", "trust_contract_v2.go", "r.Depth != 0 || len(r.Actions)", "len(r.Actions)", "^TestTrustContractV2PairedNegatives$/^depth-1$", "want CONTRACT_DEPTH"},
 		{"allow-delegate-actions", "trust_contract_v2.go", "len(r.Actions) != 0 || r.Budget", "r.Budget", "^TestTrustContractV2PairedNegatives$/^actions$", "want CONTRACT_DEPTH"},
 		{"ignore-member-set", "trust_contract_v2.go", `if code := v2Members(raw, contractV2Members, "CONTRACT_ENCODING"); code != "" {`, `if code := v2Members(raw, contractV2Members, "CONTRACT_ENCODING"); false {`, "^TestTrustContractV2PairedNegatives$/^unknown$", "want CONTRACT_FIELD"},
