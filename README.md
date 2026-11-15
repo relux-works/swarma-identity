@@ -147,7 +147,10 @@ publication, and success cannot clear an earlier failed signing gate. The
 process's EXIT/INT/TERM traps remain as defense in depth. After unlock, the
 workflow saves the original user search list and default keychain as non-secret
 paths in private `keychain-state.json`, then prepends the temporary keychain
-before codesign. The job does not change the default for signing. Both cleanup
+before codesign. Native output is parsed as one outer-quoted record per line;
+interior quotes, backslashes and spaces are literal path data. The controlled
+temporary path refuses quotes, backslashes and whitespace. The job does not
+change the default for signing. Both cleanup
 paths restore the saved search list and default before deletion. A restoration
 failure blocks publication, removes loose P8/P12/password files and retains the
 keychain plus non-secret state for the independent cleanup retry.

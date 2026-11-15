@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 from pathlib import Path
-import shlex
 import subprocess
 import sys
 
@@ -14,17 +13,37 @@ class StateError(ValueError):
 
 
 def security(*args):
-    return subprocess.run(['security', *args], check=True, capture_output=True, text=True).stdout
+    # Decode filesystem bytes losslessly; text=True would normalize CR/LF.
+    return os.fsdecode(subprocess.run(['security', *args], check=True, capture_output=True).stdout)
 
 
 def paths(raw):
-    values = shlex.split(raw)
-    if any(not value.startswith('/') or '\x00' in value for value in values):
-        raise StateError('expected absolute keychain paths')
+    # Apple prints one path per line with raw, unescaped contents between the
+    # first/last double quote. Interior quotes/backslashes are filename bytes,
+    # never shell tokens. Only the final record terminator may be discarded.
+    lines = os.fsdecode(raw).split('\n')
+    if lines[-1] == '':
+        lines.pop()
+    if not lines:
+        raise StateError('expected native keychain path records')
+    values = []
+    for line in lines:
+        line = line.lstrip(' \t')
+        if len(line) < 2 or line[0] != '"' or line[-1] != '"':
+            raise StateError('expected an outer-quoted native path record')
+        value = line[1:-1]
+        if not value.startswith('/') or any(char in value for char in '\x00\r\n'):
+            raise StateError('expected a nonempty absolute keychain path')
+        values.append(value)
     return values
 
 
 def configure(work, keychain):
+    # This job owns the temporary path. Refuse characters that could make its
+    # native display ambiguous; original user paths remain fully literal.
+    if (not keychain.is_absolute()
+            or any(char in ('"', "'", '\\', '\x00') or char.isspace() for char in str(keychain))):
+        raise StateError('unsafe temporary keychain path')
     state = work / 'keychain-state.json'
     if state.exists() or state.is_symlink():
         raise StateError('original keychain state already recorded')

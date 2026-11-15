@@ -49,7 +49,7 @@ elif name == 'security':
         state = root / 'search-list.json'
         if '-s' not in args:
             trace('query-list')
-            for path in json.loads(state.read_text()): print('    ' + json.dumps(path))
+            for path in json.loads(state.read_text()): print('    "' + path + '"')
         else:
             values = args[args.index('-s') + 1:]
             restoring = not values or '/swarma-release.' not in values[0]
@@ -65,7 +65,7 @@ elif name == 'security':
     elif args[0] == 'default-keychain':
         state = root / 'default-keychain.json'
         if '-s' not in args:
-            trace('query-default'); print(json.dumps(json.loads(state.read_text())))
+            trace('query-default'); print('    "' + json.loads(state.read_text()) + '"')
         else:
             trace('restore-default')
             marker = root / 'default-restore-failed'
@@ -158,7 +158,7 @@ class CleanupWorkflowTests(unittest.TestCase):
             path.chmod(0o700)
         self.runner = self.root / 'runner'
         self.runner.mkdir()
-        self.original_search = [str(self.root / 'Login "Team".keychain-db'), str(self.root / 'Other Keychain.keychain-db')]
+        self.original_search = [str(self.root / name) for name in ('Login "Team".keychain-db', 'Other Keychain.keychain-db', 'Normal.keychain-db', r'literal\backslash.keychain-db', 'one" "/two.keychain-db')]
         self.original_default = self.original_search[0]
         (self.root / 'search-list.json').write_text(json.dumps(self.original_search))
         (self.root / 'default-keychain.json').write_text(json.dumps(self.original_default))

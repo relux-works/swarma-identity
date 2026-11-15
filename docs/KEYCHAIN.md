@@ -389,7 +389,10 @@ failure blocks publication and its success cannot clear an earlier failed gate.
 The EXIT/INT/TERM trap uses the same idempotent helper as defense in depth.
 After unlocking the temporary keychain, the workflow saves the original user
 search-list/default paths in private `keychain-state.json`, then prepends the
-temporary keychain to the user search list before codesign. It does not change
+temporary keychain to the user search list before codesign. Each native output
+line has one outer quote pair; its contents are literal, including quotes,
+backslashes and spaces. Malformed/empty/multiline records and unsafe controlled
+temporary paths refuse before native list mutation. The job does not change
 the default during signing. Both cleanup paths restore the search list and
 default before deleting the temporary keychain. If restoration fails, they
 retain the keychain/recovery paths for retry, remove loose credential files and
