@@ -81,6 +81,7 @@ type GrantDraft struct {
 	NotAfter        int64           `json:"not_after"`
 	Seal            rental.Point    `json:"seal"`
 	ConsentTemplate ConsentTemplate `json:"consent_template"`
+	ScopeTextB64    *string         `json:"scope_text_b64,omitempty"`
 }
 
 // SigningDigest names who signs which 32-byte message with which public key.
@@ -107,8 +108,9 @@ type GrantConsentRequest struct {
 
 type GrantConsentResult struct {
 	ConsentEvent rental.Event    `json:"consent_event"`
-	Contract     TrustContract   `json:"contract"`
+	Contract     any             `json:"contract"`
 	ToSign       []SigningDigest `json:"to_sign"`
+	ScopeTextB64 *string         `json:"scope_text_b64,omitempty"`
 }
 
 type GrantSignRequest struct {
@@ -132,6 +134,7 @@ type GrantSignResult struct {
 	Commitment       string              `json:"commitment,omitempty"`
 	ContractB64      string              `json:"contract_b64"`
 	ObservedTip      Tip                 `json:"observed_tip"`
+	ScopeTextB64     *string             `json:"scope_text_b64,omitempty"`
 }
 
 // refuse is a named grant-contract refusal (exit 3, not retryable).
@@ -168,7 +171,7 @@ func sigValid(key, digest, sig string) bool {
 // checkDraft re-derives every draft member from the contract bytes and refuses
 // a record whose grant fields disagree with its contract.
 func checkDraft(d GrantDraft) ([]byte, TrustContract, *Failure) {
-	if d.Schema != GrantRecordSchema {
+	if d.Schema != GrantRecordSchema || d.ScopeTextB64 != nil {
 		return nil, TrustContract{}, fail("BAD_INPUT")
 	}
 	if pinnedGenesis(d.Network) == "" || d.Genesis != pinnedGenesis(d.Network) {
@@ -280,7 +283,7 @@ func (c *Client) DraftGrant(ctx context.Context, r GrantDraftRequest, ledgerPath
 	}
 	tags := trustConsentTags(raw)
 	t := ConsentTemplate{consentEventID(r.GranteeKey, r.ConsentCreatedAt, consentKind, tags, ""), r.GranteeKey, r.ConsentCreatedAt, consentKind, tags, ""}
-	d := GrantDraft{GrantRecordSchema, r.Network, genesis, r.LandlordName, r.AgentName, issuer, r.GranteeKey, r.GranteeName, base64.StdEncoding.EncodeToString(raw), sha256Hex(raw), trustScope(r.Actions), r.SpendBudget, r.NotBefore, r.NotAfter, r.Seal, t}
+	d := GrantDraft{GrantRecordSchema, r.Network, genesis, r.LandlordName, r.AgentName, issuer, r.GranteeKey, r.GranteeName, base64.StdEncoding.EncodeToString(raw), sha256Hex(raw), trustScope(r.Actions), r.SpendBudget, r.NotBefore, r.NotAfter, r.Seal, t, nil}
 	if _, _, f := checkDraft(d); f != nil {
 		return nil, fail("INTERNAL")
 	}
@@ -296,7 +299,7 @@ func ConsentGrant(r GrantConsentRequest) (*GrantConsentResult, *Failure) {
 	if r.Schema != GrantConsentSchema || (r.ConsentEvent == nil) == (r.ConsentSig == "") {
 		return nil, fail("BAD_INPUT")
 	}
-	raw, tc, f := checkDraft(r.Draft)
+	raw, tc, f := checkDraftForGrant(r.Draft)
 	if f != nil {
 		return nil, f
 	}
@@ -310,7 +313,7 @@ func ConsentGrant(r GrantConsentRequest) (*GrantConsentResult, *Failure) {
 	if f := checkConsent(r.Draft, raw, e); f != nil {
 		return nil, f
 	}
-	return &GrantConsentResult{e, tc, []SigningDigest{digestSigner("landlord", r.Draft.IssuerKey, PurposeContract, r.Draft.ContractSHA256)}}, nil
+	return &GrantConsentResult{e, tc, []SigningDigest{digestSigner("landlord", r.Draft.IssuerKey, PurposeContract, r.Draft.ContractSHA256)}, r.Draft.ScopeTextB64}, nil
 }
 
 // SignGrant verifies the landlord's external signatures against the landlord's
@@ -329,7 +332,7 @@ func (c *Client) SignGrant(ctx context.Context, r GrantSignRequest, ledgerPath s
 	if d.Network != c.config.Network || c.config.Node.GenesisHash != pinnedGenesis(d.Network) {
 		return nil, refuse("NETWORK_PIN")
 	}
-	raw, _, f := checkDraft(d)
+	raw, _, f := checkDraftForGrant(d)
 	if f != nil {
 		return nil, f
 	}
@@ -368,7 +371,7 @@ func (c *Client) SignGrant(ctx context.Context, r GrantSignRequest, ledgerPath s
 	if err != nil {
 		return nil, rentalRefusal(err)
 	}
-	result := &GrantSignResult{Stage: "grant_hash", GrantSigningHash: hash, ContractB64: d.ContractB64, ObservedTip: tip}
+	result := &GrantSignResult{Stage: "grant_hash", GrantSigningHash: hash, ContractB64: d.ContractB64, ObservedTip: tip, ScopeTextB64: d.ScopeTextB64}
 	if !final {
 		result.GrantB64 = base64.StdEncoding.EncodeToString(unsigned)
 		result.ToSign = []SigningDigest{digestSigner("landlord", onChain, PurposeGrant, hash)}

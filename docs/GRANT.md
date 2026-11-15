@@ -1,7 +1,9 @@
 # Trust-grant issuance and unsigned transactions
 
 These commands issue a Grant v3 (LIP-0004) whose contract is a
-`swarma-trust-contract/1` document (LIP-0013). They follow the general CLI
+`swarma-trust-contract/1` document (LIP-0013). The adjacent `grant draft-v2`
+and `grant contract-verify` commands add depth-zero profile `/2`; see
+[below](#depth-zero-profile-2). They follow the general CLI
 rules in [CLI.md](CLI.md): `--json`, long options once, strict closed input
 files of at most 64 KiB, and exactly one result envelope.
 
@@ -537,3 +539,158 @@ These are source-checked loopback fixtures, not live Core qualification.
 - **Wall-clock window.** The window and `created_at` are checked for shape and
   order only. Freshness against the wall clock is the verifier's decision
   (`rental.Check`).
+
+## Depth-zero profile /2
+
+This implementation pins LIP-0014 to `swarma-link-spec` commit
+`2012ac9155568af80d610bdf9b7683881a46e5cb` (0.1.48).
+The normative source paths at that revision are
+`lips/LIP-0014-notary-certified-redelegation.md`,
+`lips/LIP-0013-trust-contract.md` and `lips/LIP-0004-landlord-grants.md`.
+The public Go entry points are `ParseTrustContractV2`, `EncodeTrustContractV2`,
+`IssueTrustContractV2` and `VerifyTrustContractV2` in `internal/facade`.
+
+The canonical object has exactly the following fifteen members, in this
+order. Every string and integer follows LIP-0013 section 2.1: printable ASCII
+strings with only quote/backslash escapes, unsigned canonical decimal integers
+at most 9223372036854775807, no whitespace or trailing newline, no null,
+boolean, fraction or exponent. Total contract size is at most 8192 bytes.
+Scope text itself is outside this object and may contain arbitrary bytes.
+
+| # | Member | Source clause and rule |
+| --- | --- | --- |
+| 1 | `profile` | LIP-0014 section 3: exactly `swarma-trust-contract/2` |
+| 2 | `network` | LIP-0014 section 3, members 2–10; LIP-0013 section 2.1: main or regtest |
+| 3 | `landlord_name` | Same clauses: v3 id/name syntax |
+| 4 | `agent_name` | Same clauses: v3 id/name syntax, different from landlord |
+| 5 | `grantee_key` | Same clauses: valid lowercase x-only public key |
+| 6 | `actions` | Same clauses; LIP-0013 section 2.2: nonempty sorted distinct set of instruct, land, review, spend |
+| 7 | `repos` | Same clauses; LIP-0013 section 2.3 rule 5: repositories exactly when land is present |
+| 8 | `spend_budget` | Same clauses; LIP-0013 section 2.3 rule 6: positive exactly when spend is present, at most 2100000000000000 |
+| 9 | `not_before` | Same clauses: nonnegative Unix seconds |
+| 10 | `not_after` | Same clauses: greater than not_before, at most 253402300799 |
+| 11 | `scope_text_sha256` | LIP-0014 sections 3 and 3.3: absent text sentinel `""`, or SHA-256 of the separate document's exact octets, 64 lowercase hex |
+| 12 | `parent_grant_id` | LIP-0014 sections 3 and 3.1 rule 8: `""` for root, otherwise 64 lowercase hex |
+| 13 | `ordinal` | Same clauses: 0 for root, 1–16 for child |
+| 14 | `delegate` | LIP-0014 sections 3 and 2: the six-member object below |
+| 15 | `note` | LIP-0014 section 3; LIP-0013 sections 2.1 and 2.3 rule 7: printable ASCII, at most 280 bytes, no authority |
+
+LIP-0014 section 2 defines all six `delegate` members and their order:
+
+| Member | Value admitted in this slice |
+| --- | --- |
+| `depth` | `0` |
+| `actions` | `[]` |
+| `budget` | `0` |
+| `slots` | `[]` |
+| `notaries` | `[]` |
+| `checkpoint` | `""` |
+
+Thus the only admitted right is exactly
+`{"depth":0,"actions":[],"budget":0,"slots":[],"notaries":[],"checkpoint":""}`.
+No notary is needed, selected, contacted or inferred. For fail-closed parsing
+of nonempty rights, the typed wire shapes retain only the section 2 members:
+a slot has `executor,grantee,cap,notary`; a notary entry has
+`name,registration,owner`; registration has `txid,vout`. No v4-only field,
+legacy `agents`/`grantees`/`max_children`, wildcard or imported policy is admitted.
+
+The parser checks child syntax, including parent/ordinal pairing, but this
+slice's issuer, verifier and consent/sign flow refuse every child as
+`CONTRACT_DEPTH`: the depth-one parent and certification checks of LIP-0014
+section 8 are unavailable. These commands issue and verify roots only.
+
+### `grant draft-v2 --config FILE --request FILE --seal-ledger FILE --json`
+
+The closed request is:
+
+```json
+{"schema":"swarma-trust/draft/2","contract":{"profile":"swarma-trust-contract/2","network":"regtest","landlord_name":"id/landlord","agent_name":"id/landlord-agent","grantee_key":"<valid x-only key>","actions":["instruct","review"],"repos":[],"spend_budget":0,"not_before":1794528000,"not_after":1797120000,"scope_text_sha256":"","parent_grant_id":"","ordinal":0,"delegate":{"depth":0,"actions":[],"budget":0,"slots":[],"notaries":[],"checkpoint":""},"note":""},"seal":{"txid":"<64 lowercase hex>","vout":0},"consent_created_at":1794527000}
+```
+
+Optional request members are `grantee_name` (the unchanged v3 metadata) and
+`scope_text_b64` (canonical padded standard base64 of the separate text).
+For no text, use `scope_text_sha256:""` and omit `scope_text_b64`.
+For a present empty document, use the SHA-256 of zero bytes and include
+`scope_text_b64:""`. Missing, mismatched or unexpected text refuses as
+`SCOPE_TEXT_HASH`. No trimming, newline conversion or Unicode normalization
+occurs (LIP-0014 section 3.3). The issuer verifies the supplied hash; it never
+fills or replaces a contract member implicitly.
+
+The result has the same `{draft,contract,to_sign,observed_tip}` structure as
+`grant draft`, with all fifteen `/2` members in `contract`. The draft uses
+`schema:"swarma-trust/draft-record/2"`; its common fields are unchanged and
+it carries the optional separate `scope_text_b64`. The canonical unsigned
+contract is `draft.contract_b64`. Draft never signs, opens a signing key or
+writes the seal ledger. Its node and seal-ledger checks are those of `/1`.
+
+Use this draft with the existing `grant consent` and `grant sign` commands
+and their unchanged request schemas. They rebind the contract fields,
+derived v3 scope, budget and consent tags under LIP-0014 section 3.2, and
+verify the exact scope text at every stage. Consent returns the full `/2`
+contract; consent and sign preserve the separate text in their results.
+The grantee signs the same kind-8181 event shape. The landlord signs the raw
+32-byte contract SHA-256 and then the grant hash under the unchanged
+`swarma-grant-v3` prefix (LIP-0004 sections 2–3). The issuance commitment
+retains `swarma-issue-v1` (LIP-0004 section 4). No `/2` signing prefix exists.
+
+The Mac `swarma-keychain keychain sign` input/display remains `/1` only;
+passing a `/2` draft to that adapter refuses as `BAD_INPUT`. Supply public
+signatures through an external signer that can render all fifteen members
+and the exact separate scope text, recomputing the digests itself. No signer
+adapter or new key handling is added here.
+
+### `grant contract-verify --request FILE --json`
+
+This command is offline and accepts no config, ledger or signing option:
+
+```json
+{"schema":"swarma-trust/contract-verify/2","contract_b64":"<canonical contract bytes in standard base64>","issuer_key":"<expected public grant key>","landlord_sig":"<128 lowercase hex>"}
+```
+
+Include `scope_text_b64` exactly as above when the contract has a text hash.
+The command parses canonical `/2` bytes, refuses a child or nonempty right,
+checks the scope document, and verifies BIP-340 over the raw contract SHA-256
+with the explicitly supplied issuer key. Success returns
+`{contract,contract_sha256,signature_valid:true,scope_text_b64?}`.
+Failure returns no result, with the standard closed envelope and exit code.
+This establishes an offline signature under the supplied key. It does not
+bind that key to a name, check a complete grant, read a chain, establish a
+live grant or admit an instruction. No notary verification is performed.
+
+### Refusals and compatibility
+
+- `CONTRACT_FIELD`: unknown or duplicate contract member, including nested
+  members; also the existing common-field and scope-hash syntax checks.
+- `CONTRACT_DEPTH`: any depth above zero or any well-shaped nonempty right;
+  also a child presented for issuance, consent/signing or signature verification.
+- `CONTRACT_PARENT`: malformed parent/ordinal relationship.
+- `CONTRACT_DELEGATE`: malformed nested shape or type, missing or reordered
+  nested member. `CONTRACT_ENCODING` still owns lexical errors everywhere.
+- `SCOPE_TEXT_HASH`: absent, unexpected, malformed-base64 or mismatching scope
+  document. The exact-octet binding is LIP-0014 section 3.3; this named code
+  is local because that section defines no code for it.
+- `LANDLORD_SIGNATURE`: malformed or bad public countersignature, including
+  a signature under a made-up `/2` prefix.
+- Other canonical, profile, action, repository, budget, note, binding and
+  issuance refusals retain the existing codes. Domain refusals exit 3;
+  malformed transport requests/options are `BAD_INPUT` and exit 2.
+
+The task explicitly narrows the draft LIP's refusal-code contract:
+unknown/duplicate members use `CONTRACT_FIELD` rather than section 3.1's
+`CONTRACT_ENCODING`/`CONTRACT_DELEGATE`, and unsupported rights use
+`CONTRACT_DEPTH` rather than `CONTRACT_DELEGATE`/`DELEGATE_NO_NOTARY`.
+No claim of full LIP-0014 conformance or depth-one support follows.
+
+`ParseTrustContract` and `EncodeTrustContract` remain `/1` only and unchanged.
+An eleven-member contract with a `/2` profile still refuses
+`CONTRACT_PROFILE`; a fifteen-member object still refuses
+`CONTRACT_ENCODING` in the `/1` reader. Existing `/1` command outputs do not
+acquire scope text or any `/2` field. Four exact CLI envelopes from base
+`eaa8523c` and the existing LIP-0013 goldens pin this regression boundary.
+
+The fixture provenance is in
+[`testdata/lip0014/README.md`](../internal/facade/testdata/lip0014/README.md).
+Focused validation uses
+`go test ./internal/facade -run '^TestTrustContractV2|^TestTrustContractV1' -count=1 -v`;
+full validation uses `go test ./... -race` and `go vet ./...`. Test artifacts,
+logs and bounded mutation overlays belong under `.temp/`.

@@ -1,0 +1,74 @@
+{
+  "schema": "swarma-link-spec/lip-0014-vectors/1",
+  "scope_text": "Work on the documentation of the alpha repository only.\n",
+  "source_commit": "2012ac9155568af80d610bdf9b7683881a46e5cb",
+  "source_sha256": "563d49574f3c2bd913316cd0b0a295987648f5c281d28a68b065bf96ef180f14",
+  "contracts": [
+    {
+      "id": "contract-04",
+      "claim": "A root without the right of re-delegation: depth 0 has one value. It carries a scope text hash and a note with both escapes",
+      "rules": [
+        "r9.depth-0",
+        "r3",
+        "r1.form"
+      ],
+      "contract": "{\"profile\":\"swarma-trust-contract/2\",\"network\":\"main\",\"landlord_name\":\"id/acme\",\"agent_name\":\"id/acme-executor\",\"grantee_key\":\"f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9\",\"actions\":[\"instruct\",\"review\"],\"repos\":[],\"spend_budget\":0,\"not_before\":1794528000,\"not_after\":1797120000,\"scope_text_sha256\":\"759de25bd7d1e5cd815a2e9a1359eeb3f8f77c4aba90d41c9de3bbb0c9de5104\",\"parent_grant_id\":\"\",\"ordinal\":0,\"delegate\":{\"depth\":0,\"actions\":[],\"budget\":0,\"slots\":[],\"notaries\":[],\"checkpoint\":\"\"},\"note\":\"A note with \\\"quotes\\\" and a \\\\ backslash.\"}",
+      "bytes": 560,
+      "expected": "ok",
+      "member_set": 15,
+      "sha256": "a9f5c6bb18ac52d04d6c52e02302dd7cafa2b0038299dcf16f862df4fcc12ec1",
+      "v3_scope": [],
+      "v3_budget": 0,
+      "consent_booking": "40e3ecf995050d275759d44cfc770b9cbfd1218a7238feaea3e194c2d0486bd7"
+    },
+    {
+      "id": "contract-06",
+      "claim": "A child of ordinal 1: a parent id and the right with depth 0",
+      "rules": [
+        "r8.parent-id",
+        "r8.depth"
+      ],
+      "contract": "{\"profile\":\"swarma-trust-contract/2\",\"network\":\"main\",\"landlord_name\":\"id/acme\",\"agent_name\":\"id/acme-worker-a\",\"grantee_key\":\"dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659\",\"actions\":[\"instruct\",\"review\"],\"repos\":[],\"spend_budget\":0,\"not_before\":1794528000,\"not_after\":1797120000,\"scope_text_sha256\":\"\",\"parent_grant_id\":\"47e818d0d6e85f03b69df83f5bd900d0f4768ce7b7fb73f40732f0a65be269d4\",\"ordinal\":1,\"delegate\":{\"depth\":0,\"actions\":[],\"budget\":0,\"slots\":[],\"notaries\":[],\"checkpoint\":\"\"},\"note\":\"\"}",
+      "bytes": 518,
+      "expected": "ok",
+      "member_set": 15,
+      "sha256": "1f3ecc4445272109b32debb5012c916630738d78c6b156b35a7ea428aa709576",
+      "v3_scope": [],
+      "v3_budget": 0,
+      "consent_booking": "4ec175ab856db87f3c43d4a47758f873d939d1adf883cfdacbeaf6a22e0fd2f2"
+    },
+    {
+      "id": "contract-07",
+      "claim": "A child of ordinal 16, the largest ordinal",
+      "rules": [
+        "r8.ordinal"
+      ],
+      "contract": "{\"profile\":\"swarma-trust-contract/2\",\"network\":\"main\",\"landlord_name\":\"id/acme\",\"agent_name\":\"id/acme-worker-a\",\"grantee_key\":\"dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659\",\"actions\":[\"instruct\",\"review\"],\"repos\":[],\"spend_budget\":0,\"not_before\":1794528000,\"not_after\":1797120000,\"scope_text_sha256\":\"\",\"parent_grant_id\":\"47e818d0d6e85f03b69df83f5bd900d0f4768ce7b7fb73f40732f0a65be269d4\",\"ordinal\":16,\"delegate\":{\"depth\":0,\"actions\":[],\"budget\":0,\"slots\":[],\"notaries\":[],\"checkpoint\":\"\"},\"note\":\"\"}",
+      "bytes": 519,
+      "expected": "ok",
+      "member_set": 15,
+      "sha256": "6e708860f66718786aab21b02d456681b8e89a1a48a0737cfcf9ff3da390cf99",
+      "v3_scope": [],
+      "v3_budget": 0,
+      "consent_booking": "73601513a845df5e139ebaffc975b6023c67a8ce320adc272438c573dfe8c5df"
+    },
+    {
+      "id": "contract-12",
+      "claim": "A child that carries spend for itself is a valid contract; whether its parent delegates spend is a check of section 4",
+      "rules": [
+        "r8.depth",
+        "r6"
+      ],
+      "contract": "{\"profile\":\"swarma-trust-contract/2\",\"network\":\"main\",\"landlord_name\":\"id/acme\",\"agent_name\":\"id/acme-worker-a\",\"grantee_key\":\"dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659\",\"actions\":[\"instruct\",\"spend\"],\"repos\":[],\"spend_budget\":60,\"not_before\":1794528000,\"not_after\":1797120000,\"scope_text_sha256\":\"\",\"parent_grant_id\":\"47e818d0d6e85f03b69df83f5bd900d0f4768ce7b7fb73f40732f0a65be269d4\",\"ordinal\":1,\"delegate\":{\"depth\":0,\"actions\":[],\"budget\":0,\"slots\":[],\"notaries\":[],\"checkpoint\":\"\"},\"note\":\"\"}",
+      "bytes": 518,
+      "expected": "ok",
+      "member_set": 15,
+      "sha256": "9a93cbe8707a4101757725ff50faf2dd0c3a15b54851c03e5c5e3c42a1ee605f",
+      "v3_scope": [
+        "pay"
+      ],
+      "v3_budget": 60,
+      "consent_booking": "84ab4333596f63f5958a90c4a9cabc6f5368fa5dc1c40bd0cf205bd2b0374c86"
+    }
+  ]
+}

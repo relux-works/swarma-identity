@@ -576,7 +576,7 @@ func assembleGrant(d GrantDraft, raw []byte, consent rental.Event, landlordSig, 
 		budget := d.Budget
 		g.Budget = &budget
 	}
-	if code := bindTrustContract(raw, trustGrantView{g.Network, g.AgentName, g.LandlordName, g.GranteeKey, g.ContractSHA256, g.Scope, g.BudgetSat(), g.NotBefore, g.NotAfter, g.Consent.ConsentEvent.Tags}); code != "" {
+	if code := bindDraftContract(raw, trustGrantView{g.Network, g.AgentName, g.LandlordName, g.GranteeKey, g.ContractSHA256, g.Scope, g.BudgetSat(), g.NotBefore, g.NotAfter, g.Consent.ConsentEvent.Tags}, d.Schema); code != "" {
 		return rental.Grant{}, refuse(code)
 	}
 	return g, nil

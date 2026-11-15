@@ -12,6 +12,13 @@ A Swarma module for an agent-facing facade over Namecoin and Nostr. The current 
 - Two-phase Grant v3 issuance with a LIP-0013 trust contract: `grant draft` builds the exact bytes and the digests to sign, `grant consent` verifies the grantee's externally signed consent, and `grant sign` verifies the landlord's external signatures against the on-chain grant key and assembles the signed grant, its `grant_id` and its issuance commitment. See [the grant contract](docs/GRANT.md).
 - `grant seal` builds one P2PKH seal to the even-y grant key, plus separate funding change. `grant anchor` checks that seal with mempool-inclusive `gettxout` (confirmed, unspent, expected P2PKH/key) and builds the exact LIP-0005 issuance frame for the signed grant. Both return unsigned wire transactions and PSBTv0 with public parents, explicit fees and `dry_run:true`; neither signs nor broadcasts.
 
+Depth-zero `swarma-trust-contract/2` (LIP-0014, pinned at spec 0.1.48) is
+available through `grant draft-v2` and the offline `grant contract-verify`.
+Draft returns unsigned canonical bytes for the existing public-signature
+consent/countersign flow. Scope text travels as separate exact bytes.
+Only the empty depth-zero right is admitted; child certification and notaries
+remain outside this slice. See [the /2 contract](docs/GRANT.md#depth-zero-profile-2).
+
 Node deployment/lifecycle, name transactions, transaction signing/broadcast, live grant verification, Nostr publication and NIP-05 resolution remain planned. Wallet-visible balance is not implemented. No plugin registration interface is exposed by this version.
 
 The CLI uses no private keys or signer. The grant commands only exchange digests and public BIP-340 signatures with each party's own external signer; the test-only signer in `internal/testsigner` is not linked into the binary and loads only published BIP-340 test keys. Public derivation and both Nostr operations work without a node, wallet or relay. Online commands read only the selected node and never import a wallet, sign, broadcast, restart a service or automatically retry a scan. Validating a Nostr signature establishes no publication, freshness or identity authority.
@@ -31,6 +38,8 @@ GOTOOLCHAIN=local GOMAXPROCS=2 go build -p 1 -o .temp/bin/swarma-identity ./cmd/
 .temp/bin/swarma-identity nostr profile-prepare --request .temp/profile-prepare.json --json
 .temp/bin/swarma-identity nostr profile-verify --request .temp/profile-verify.json --json
 .temp/bin/swarma-identity grant draft --config .temp/node.json --request .temp/draft.json --seal-ledger "$PWD/.temp/seal-ledger.json" --json
+.temp/bin/swarma-identity grant draft-v2 --config .temp/node.json --request .temp/draft-v2.json --seal-ledger "$PWD/.temp/seal-ledger.json" --json
+.temp/bin/swarma-identity grant contract-verify --request .temp/contract-verify-v2.json --json
 .temp/bin/swarma-identity grant consent --request .temp/consent.json --json
 .temp/bin/swarma-identity grant sign --config .temp/node.json --request .temp/sign.json --seal-ledger "$PWD/.temp/seal-ledger.json" --json
 .temp/bin/swarma-identity grant seal --config .temp/node.json --request .temp/seal.json --json
@@ -73,7 +82,7 @@ Tests use published public BIP84 vectors and fake loopback RPC fixtures with dis
 
 Grant tests drive the three grant commands end to end against regtest- and main-pinned loopback fixture nodes with the test-only signer, reuse the pinned LIP-0013 contract, binding and consent-tag vectors ([provenance](internal/facade/testdata/lip0013/README.md)), check that no output carries any encoding of a test secret key, and run planted overlay controls that remove one check at a time. Note that the planted controls and the Nostr observation tests run `go` from `runtime.GOROOT()`, so run the suite without `-trimpath` in `GOFLAGS`.
 
-The six `grant` commands follow the same `--json` envelope rules as the seven above; `grant sign` also writes the seal ledger named by `--seal-ledger`, locking the ledger's directory with `flock` and committing through a temporary `.<ledger>.tmp-<hex>` file beside it by an atomic rename exchange (`renameat2` `RENAME_EXCHANGE` on Linux, `renameatx_np` `RENAME_SWAP` on macOS; without it a final sign refuses). A leftover temporary file from an interrupted update fences draft and sign (`LEDGER_FILE`) until `.temp/bin/swarma-identity grant ledger-recover --seal-ledger "$PWD/.temp/seal-ledger.json" --json` merges it back. Cross-compile check for both targets: `GOTOOLCHAIN=local GOOS=darwin GOARCH=arm64 go build -o .temp/bin/swarma-identity-darwin-arm64 ./cmd/swarma-identity`, and the same with `GOOS=linux GOARCH=amd64`; binaries go to `.temp/bin/`.
+The `grant` commands follow the same `--json` envelope rules as the seven above; `grant sign` also writes the seal ledger named by `--seal-ledger`, locking the ledger's directory with `flock` and committing through a temporary `.<ledger>.tmp-<hex>` file beside it by an atomic rename exchange (`renameat2` `RENAME_EXCHANGE` on Linux, `renameatx_np` `RENAME_SWAP` on macOS; without it a final sign refuses). A leftover temporary file from an interrupted update fences draft and sign (`LEDGER_FILE`) until `.temp/bin/swarma-identity grant ledger-recover --seal-ledger "$PWD/.temp/seal-ledger.json" --json` merges it back. Cross-compile check for both targets: `GOTOOLCHAIN=local GOOS=darwin GOARCH=arm64 go build -o .temp/bin/swarma-identity-darwin-arm64 ./cmd/swarma-identity`, and the same with `GOOS=linux GOARCH=amd64`; binaries go to `.temp/bin/`.
 
 Transaction requests use explicitly supplied native P2WPKH funding outpoints,
 full public parent transactions and a separate funding/change script pin.
