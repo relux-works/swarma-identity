@@ -106,6 +106,7 @@ class ReleaseChecks(unittest.TestCase):
         env = {name: "synthetic" for name in gate.SECRET_NAMES}
         env["MACOS_SIGN_P12"] = base64.b64encode(b"fixture-not-a-real-p12").decode()
         env["ASC_KEY_P8"] = "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n"
+        env["GITHUB_ACTIONS"] = "true"
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, env, clear=True):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
@@ -123,6 +124,13 @@ class ReleaseChecks(unittest.TestCase):
                 with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(gate.GateError):
                     gate.prepare_secrets(Path(tmp))
                 self.assertEqual(list(Path(tmp).iterdir()), [])
+
+    # Claim: the masking helper never prints even a mask command containing
+    # secret bytes when there is no Actions runner to consume that protocol.
+    def test_mask_is_silent_outside_actions(self):
+        with patch.dict(os.environ, {}, clear=True), contextlib.redirect_stdout(io.StringIO()) as output:
+            gate.mask("fixture-secret-never-print")
+        self.assertEqual(output.getvalue(), "")
 
     # Claim: only an explicit Accepted notary result and an accepted, notarized
     # Gatekeeper source pass the portable verdict parsers; native commands must

@@ -92,6 +92,10 @@ def check_secrets(environment):
 
 
 def mask(value):
+    # Only the Actions runner consumes and suppresses this protocol. Never
+    # render a secret into an ordinary local terminal's output.
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
     # GitHub workflow-command escaping also covers multiline PEM contents.
     for part in [value, *value.splitlines()]:
         if part:
