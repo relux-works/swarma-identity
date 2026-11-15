@@ -42,7 +42,16 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      - name: Clean signing material
+        id: cleanup
+        if: ${{ always() }}
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set +x
+          bash scripts/release-cleanup.sh
       - name: Publish verified assets through a draft release
+        if: ${{ success() && steps.cleanup.outcome == 'success' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}

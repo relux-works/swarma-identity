@@ -381,8 +381,13 @@ local ticket (nonzero exit and the specific missing-ticket diagnostic). After
 `notarytool submit --wait` returns `Accepted`, it staples and verifies the app,
 runs deliberate requirement/entitlement mismatches against extracted signed
 metadata, zips it with `ditto -c -k --keepParent`, unpacks it, and verifies again.
-Any failure prevents publishing a GitHub Release. The native missing-ticket
-control is intentionally strict: an unexpected tool error is a failed control.
+Any failure prevents publishing a GitHub Release. Before any credential files
+are prepared, the signing process persists only its non-secret work/keychain
+paths for an independent `always()` cleanup step before publication. That step
+retries cleanup after a killed signing process or first cleanup failure; its
+failure blocks publication and its success cannot clear an earlier failed gate.
+The EXIT/INT/TERM trap uses the same idempotent helper as defense in depth.
+The native missing-ticket control is intentionally strict: an unexpected tool error is a failed control.
 
 For a downloaded release, with `SwarmaKeychain.app` unpacked on macOS:
 

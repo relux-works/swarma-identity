@@ -139,7 +139,12 @@ signs its executable before the bundle with hardened runtime, secure timestamp,
 and the [committed entitlements](release/macos/swarma-keychain.entitlements.plist),
 then submits a ZIP with `notarytool --wait`. Only Apple's explicit `Accepted`
 status permits stapling. The keychain, imported P12 and temporary ASC key file
-are deleted before publication can start.
+are deleted before publication can start. Before preparing credentials, the
+signing process records only its non-secret work/keychain paths in `GITHUB_ENV`.
+An independent `if: always()` cleanup step uses those paths before publication,
+including after process termination. Cleanup is idempotent; its failure blocks
+publication, and success cannot clear an earlier failed signing gate. The
+process's EXIT/INT/TERM traps remain as defense in depth.
 
 Release assets are:
 
@@ -189,7 +194,9 @@ import/identity availability, explicit requirement compilation and display,
 Apple signing/timestamps, ASC credentials/permissions, notarization, native
 missing-ticket rejection, stapling, Gatekeeper acceptance, archive ticket
 preservation and GitHub draft/upload/publication. Linux tests establish the
-portable comparison/pin/failure contracts and cross-compilation only. Release
+portable comparison/pin/failure contracts, Bash cleanup with inert native
+boundaries, and cross-compilation only. They do not establish hosted
+cancellation scheduling or actual macOS keychain deletion. Release
 notarization does not qualify Touch ID, passcode or Keychain access policies.
 
 Release tooling (all portable commands run from the repository root):
@@ -197,7 +204,7 @@ Release tooling (all portable commands run from the repository root):
 | Tool | Purpose and exact entry point | Output |
 | --- | --- | --- |
 | Python 3, standard library | `python3 scripts/release_checks.py pins`; `python3 -m unittest discover -s scripts -p 'test_release*.py' -v` | Gate verdicts on stdout/stderr; tests use disposable fixtures. |
-| Bash and Apple tools | `bash scripts/release-macos.sh` (tag workflow only); `bash -n scripts/release-macos.sh` for portable syntax validation | Verified assets in ignored `dist/`; temporary keychain/P8/P12 under a private `$RUNNER_TEMP/swarma-release.*`, removed on exit. |
+| Bash and Apple tools | `bash scripts/release-macos.sh` (tag workflow only); `bash -n scripts/release-macos.sh` and `bash -n scripts/release-cleanup.sh` for portable syntax validation | Verified assets in ignored `dist/`; temporary keychain/P8/P12 under a private `$RUNNER_TEMP/swarma-release.*`, removed on exit. |
 | GitHub CLI | Workflow: `gh release create TAG ASSETS... --verify-tag --draft`, then `gh release edit TAG --draft=false`; inspection: `gh release view TAG` | Draft uploads and published assets on GitHub Releases. |
 | actionlint 1.7.12 (optional validator) | `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/release.yml .github/workflows/ci.yml` | Diagnostics on stdout/stderr; use `.temp/` for local logs. |
 

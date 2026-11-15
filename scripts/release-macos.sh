@@ -27,35 +27,31 @@ xcrun --find stapler >/dev/null
 
 work="$(mktemp -d "$RUNNER_TEMP/swarma-release.XXXXXX")"
 keychain="$work/release.keychain-db"
-keychain_created=0
 cleanup() {
   status=$?
   trap - EXIT
-  set +e
-  if [[ "$keychain_created" == 1 ]]; then
-    security delete-keychain "$keychain" >/dev/null 2>&1
-    if [[ $? != 0 ]]; then
-      printf 'release gate: temporary signing keychain deletion failed\n' >&2
-      status=1
-    fi
-  fi
-  # work is exclusively this process's mktemp directory, including the P8/P12.
-  rm -rf "$work"
-  if [[ -e "$work" ]]; then
-    printf 'release gate: temporary signing files deletion failed\n' >&2
-    status=1
+  if SWARMA_RELEASE_WORK="$work" SWARMA_RELEASE_KEYCHAIN="$keychain" bash "$ROOT/scripts/release-cleanup.sh"; then
+    :
+  else
+    # Cleanup cannot turn an earlier gate failure into success or replace its
+    # exit code. When signing succeeded, cleanup failure becomes the failure.
+    cleanup_status=$?
+    if [[ "$status" == 0 ]]; then status="$cleanup_status"; fi
   fi
   exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# Persist only recovery paths, before any credentials or keychain are created.
+# The workflow runner consumes this file even if this process cannot run EXIT.
+printf 'SWARMA_RELEASE_WORK=%s\nSWARMA_RELEASE_KEYCHAIN=%s\n' \
+  "$work" "$keychain" >> "$GITHUB_ENV"
 python3 "$CHECKS" prepare-secrets "$work"
 keychain_password="$(cat "$work/keychain-password")"
 issuer="$ASC_ISSUER_ID"
 key_id="$ASC_KEY_ID"
 security create-keychain -p "$keychain_password" "$keychain"
-keychain_created=1
 security set-keychain-settings -lut 21600 "$keychain"
 security unlock-keychain -p "$keychain_password" "$keychain"
 security import "$work/certificate.p12" -k "$keychain" -P "$MACOS_SIGN_P12_PASSWORD" -T /usr/bin/codesign > "$work/import.log" 2>&1
@@ -158,5 +154,5 @@ done
   shasum -a 256 ./*.zip ./*.tar.gz DESIGNATED-REQUIREMENT.txt > SHA256SUMS
   shasum -a 256 -c SHA256SUMS
 )
-# The EXIT trap must successfully remove the keychain and key files before the
-# workflow advances to the only publication step. No success marker overrides it.
+# The EXIT trap is defense in depth; the independent workflow cleanup step
+# must also succeed before publication. No success marker overrides either gate.
