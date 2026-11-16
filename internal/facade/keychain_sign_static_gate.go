@@ -33,6 +33,9 @@ import (
 //     requested digest must be its SHA-256;
 //   - G must be canonical CCJ-1: it is parsed, encoded again and compared
 //     byte for byte;
+//   - G must have exactly the top-level members of the published format, and
+//     the members that format owns must have its shapes; the five sections
+//     stay opaque non-empty objects;
 //   - the key is bound to the purpose by its label, in both directions (see
 //     refuseStaticGateKeyForGrant), and G must name that label and that key;
 //   - every value of G is shown by its path, read from the parsed bytes with
@@ -50,7 +53,23 @@ const (
 	staticGateMaxPreimage = 8192
 	staticGateMaxWindow   = 72 * time.Hour
 	staticGateTimeLayout  = "2006-01-02T15:04:05Z"
+	staticGateMilestone   = "G1.0"
 	ccjMaxDepth           = 8
+	// ccjMaxInteger is 2^53-1: CCJ-1 admits integers only in
+	// -(2^53-1)..2^53-1.
+	ccjMaxInteger = 9007199254740991
+)
+
+// staticGateMembers is the closed top-level member set of the published
+// statement format (section 4 of the format): every member is required and
+// no other is admitted. staticGateSections are the members among them that
+// the signer never interprets: each is a non-empty object, nothing more.
+var (
+	staticGateMembers = []string{
+		"approver", "association", "broker_d5", "broker_time", "dispatcher", "gate_id", "host",
+		"keymaker", "kind", "milestone", "not_after", "not_before", "source", "v",
+	}
+	staticGateSections = []string{"broker_d5", "broker_time", "dispatcher", "keymaker", "source"}
 )
 
 // StaticGateSignRequest is the closed request of the static-gate schema.
@@ -130,12 +149,28 @@ func (o ccjObject) object(name string) (ccjObject, bool) {
 	return sub, ok
 }
 
+// hasExactly reports whether the object's members are exactly the named ones.
+// ccjParse admits no duplicate name, so an equal count with every name
+// present leaves no room for an unknown member.
+func (o ccjObject) hasExactly(names ...string) bool {
+	if len(o) != len(names) {
+		return false
+	}
+	for _, name := range names {
+		if _, ok := o.get(name); !ok {
+			return false
+		}
+	}
+	return true
+}
+
 var ccjIntegerPattern = regexp.MustCompile(`^(0|-?[1-9][0-9]*)$`)
 
 // ccjParse reads exactly one JSON value under the CCJ-1 limits: valid UTF-8,
 // no duplicate name in an object, integers only (shortest spelling, within
-// 64 bits) and at most ccjMaxDepth nested containers, the outermost counted
-// as 1. It does not by itself establish canonical form; ccjCanonical does.
+// -ccjMaxInteger..ccjMaxInteger) and at most ccjMaxDepth nested containers,
+// the outermost counted as 1. It does not by itself establish canonical form;
+// ccjCanonical does.
 func ccjParse(raw []byte) (any, bool) {
 	if !utf8.Valid(raw) {
 		return nil, false
@@ -180,7 +215,11 @@ func ccjParse(raw []byte) (any, bool) {
 		case string:
 			return v, true
 		case json.Number:
-			if _, err := strconv.ParseInt(v.String(), 10, 64); err != nil || !ccjIntegerPattern.MatchString(v.String()) {
+			n, err := strconv.ParseInt(v.String(), 10, 64)
+			if err != nil || !ccjIntegerPattern.MatchString(v.String()) {
+				return nil, false
+			}
+			if n > ccjMaxInteger || n < -ccjMaxInteger {
 				return nil, false
 			}
 			return v, true
@@ -372,10 +411,30 @@ func staticGateTime(s string) (time.Time, bool) {
 	return t, true
 }
 
+// staticGateCallerKey admits exactly "ed25519:" followed by the canonical
+// unpadded base64url spelling of 32 bytes. The bytes are not checked as a
+// curve point.
+func staticGateCallerKey(s string) bool {
+	rest, ok := strings.CutPrefix(s, "ed25519:")
+	raw, err := base64.RawURLEncoding.Strict().DecodeString(rest)
+	return ok && err == nil && len(raw) == 32 && base64.RawURLEncoding.EncodeToString(raw) == rest
+}
+
+// staticGateUID admits an integer in 0..4294967295.
+func staticGateUID(v any) bool {
+	n, ok := v.(json.Number)
+	if !ok {
+		return false
+	}
+	uid, err := strconv.ParseInt(n.String(), 10, 64)
+	return err == nil && uid >= 0 && uid <= 4294967295
+}
+
 // checkStaticGate admits one statement for the label that was asked to sign
-// it, in this order: size, canonical CCJ-1, digest binding, the members the
-// signer relies on, the approver label, the window. The first failure
-// refuses; nothing is shown before all of them pass.
+// it, in this order: size, canonical CCJ-1, digest binding, the closed
+// top-level member set, the fixed values and shapes of the published format,
+// the approver label, the window. The first failure refuses; nothing is shown
+// before all of them pass.
 func checkStaticGate(statement []byte, digestHex, label string) (*staticGate, *Failure) {
 	g := &staticGate{statement: statement, preimage: staticGatePreimage(statement)}
 	if len(g.preimage) > staticGateMaxPreimage {
@@ -391,23 +450,45 @@ func checkStaticGate(statement []byte, digestHex, label string) (*staticGate, *F
 		return nil, staticGateRefuse("DIGEST_BINDING")
 	}
 	g.digest = sum[:]
+	// The closed member set: an unknown or a missing top-level member refuses
+	// (a duplicate one is not canonical CCJ-1 and refused above).
+	if !root.hasExactly(staticGateMembers...) {
+		return nil, staticGateRefuse("STATIC_GATE_FORM")
+	}
 	version, _ := root.get("v")
 	kind, _ := root.text("kind")
-	approver, okApprover := root.object("approver")
-	host, okHost := root.object("host")
-	association, okAssociation := root.object("association")
-	if version != json.Number("1") || kind != staticGateTag || !okApprover || !okHost || !okAssociation || len(association) == 0 {
+	milestone, _ := root.text("milestone")
+	gateID, _ := root.text("gate_id")
+	if version != json.Number("1") || kind != staticGateTag || milestone != staticGateMilestone || !lowerHex(gateID, 16) {
 		return nil, staticGateRefuse("STATIC_GATE_FORM")
+	}
+	approver, _ := root.object("approver")
+	host, _ := root.object("host")
+	association, _ := root.object("association")
+	if !approver.hasExactly("alg", "key", "label") || !host.hasExactly("label", "machine_id_sha256") || !association.hasExactly("caller_generation", "caller_key", "caller_uid") {
+		return nil, staticGateRefuse("STATIC_GATE_FORM")
+	}
+	for _, name := range staticGateSections {
+		if section, _ := root.object(name); len(section) == 0 {
+			return nil, staticGateRefuse("STATIC_GATE_FORM")
+		}
 	}
 	alg, _ := approver.text("alg")
 	key, _ := approver.text("key")
-	approverLabel, okLabel := approver.text("label")
+	approverLabel, _ := approver.text("label")
+	hostLabel, _ := host.text("label")
 	machineID, _ := host.text("machine_id_sha256")
+	callerGeneration, _ := association.text("caller_generation")
+	callerKey, _ := association.text("caller_key")
+	callerUID, _ := association.get("caller_uid")
 	notBefore, _ := root.text("not_before")
 	notAfter, _ := root.text("not_after")
 	from, okFrom := staticGateTime(notBefore)
 	until, okUntil := staticGateTime(notAfter)
-	if alg != "bip340" || !xOnlyKey(key) || !okLabel || !lowerHex(machineID, 32) || !okFrom || !okUntil {
+	if alg != "bip340" || !xOnlyKey(key) || approverLabel == "" || hostLabel == "" || !lowerHex(machineID, 32) || !okFrom || !okUntil {
+		return nil, staticGateRefuse("STATIC_GATE_FORM")
+	}
+	if callerGeneration == "" || !staticGateCallerKey(callerKey) || !staticGateUID(callerUID) {
 		return nil, staticGateRefuse("STATIC_GATE_FORM")
 	}
 	if approverLabel != label {

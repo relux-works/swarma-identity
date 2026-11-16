@@ -24,6 +24,19 @@ const (
 	gateSchema = "swarma-keychain/sign-static-gate/1"
 )
 
+// The published genuine statement of the format (the example file is its
+// byte-for-byte copy): the label and key it names, the SHA-256 of its
+// preimage and its wire signature, written out from the published format and
+// its vector files. The key is CSV index 1 of the published BIP-340 test
+// vectors; all four are public test data.
+const (
+	publishedLabel       = "static-gate-example"
+	publishedApproverKey = "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659"
+	publishedDigest      = "a9112c6bc3bfbf86661f0a637c7ad820ecaff1f777be6cc48d2a23b3e27dda41"
+	publishedSignature   = "14c37808857bbab112bfa70710d9c35c4ede88a74f6760efbd52054590644984776b1e6a2ade454548d42b2681e77e722dab37f06bb4393c95786fa322154dbb"
+	gateCallerKey        = "ed25519:iIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg"
+)
+
 // gateExample is the example statement and the pinned SHA-256 of its
 // preimage, both read from testdata (see testdata/static-gate/README.md).
 func gateExample(t *testing.T) ([]byte, string) {
@@ -46,12 +59,14 @@ func gateDigest(statement []byte) string {
 	return sha256Hex(append([]byte(gateTag+"\n"), statement...))
 }
 
-// gateStatement is the example with approver.key set to a published BIP-340
-// test key, so that a fake store can hold the matching key.
+// gateStatement is the example with approver.label set to the reserved label
+// and approver.key set to a published BIP-340 test key, so that a fake store
+// can hold the matching key under that label.
 func gateStatement(t *testing.T, key int) []byte {
 	t.Helper()
 	example, _ := gateExample(t)
-	return replaceOnce(t, example, `"key":"`+strings.Repeat("2", 64)+`"`, `"key":"`+testsigner_public(t, key)+`"`)
+	named := replaceOnce(t, example, `"label":"`+publishedLabel+`"`, `"label":"`+gateLabel+`"`)
+	return replaceOnce(t, named, `"key":"`+publishedApproverKey+`"`, `"key":"`+testsigner_public(t, key)+`"`)
 }
 
 func gateRequest(statement []byte) StaticGateSignRequest {
@@ -87,7 +102,11 @@ func signGate(t *testing.T, statement []byte) (string, StaticGateSignResult) {
 	if !h.keyRead || res.Digest != r.Digest || !sigValid(testsigner_public(t, keyOther), r.Digest, res.Signature) {
 		t.Fatalf("positive control did not sign the requested digest: %v", h.log)
 	}
-	if len(h.log) < 4 || h.log[0] != "public:"+gateLabel || h.log[1] != "show" || h.log[2] != "confirm" || h.log[3] != "secret:"+gateLabel || h.count("show") != 1 || h.count("secret:") != 1 {
+	// The whole trace, exactly: the public read that binds approver.key, the
+	// display, the confirmation, and only then the signing step, which reads
+	// the public key again and then the secret, as under sign/1 and sign/2.
+	wantOrder := []string{"public:" + gateLabel, "show", "confirm", "public:" + gateLabel, "secret:" + gateLabel}
+	if !slices.Equal(h.log, wantOrder) {
 		t.Fatalf("unexpected approval/secret ordering: %v", h.log)
 	}
 	return h.preKey, res
@@ -106,15 +125,16 @@ func refusedGate(t *testing.T, h *kcHarness, e Envelope, code int, want string, 
 	}
 }
 
-// padGate appends a member zz_pad so that the preimage has exactly total
-// bytes; the result stays canonical (zz_pad sorts after v).
+// padGate appends a member zz_pad to the broker_time section, which the
+// signer does not interpret, so that the preimage has exactly total bytes;
+// the result stays canonical (zz_pad sorts after example_in_flight).
 func padGate(t *testing.T, statement []byte, total int) []byte {
 	t.Helper()
 	n := total - len(gateTag) - 1 - len(statement) - len(`,"zz_pad":""`)
 	if n < 0 {
 		t.Fatal("fixture: the statement is too long to pad")
 	}
-	out := replaceOnce(t, statement, `,"v":1}`, `,"v":1,"zz_pad":"`+strings.Repeat("a", n)+`"}`)
+	out := replaceOnce(t, statement, `"example_in_flight":1}`, `"example_in_flight":1,"zz_pad":"`+strings.Repeat("a", n)+`"}`)
 	if len(gateTag)+1+len(out) != total {
 		t.Fatalf("fixture: padded preimage is %d bytes, want %d", len(gateTag)+1+len(out), total)
 	}
@@ -151,9 +171,195 @@ func TestStaticGateExampleVector(t *testing.T) {
 	if _, ok := ccjCanonical(statement); !ok {
 		t.Fatal("the example is not canonical CCJ-1")
 	}
-	g, f := checkStaticGate(statement, pinned, gateLabel)
+	g, f := checkStaticGate(statement, pinned, publishedLabel)
 	if f != nil || hex.EncodeToString(g.digest) != pinned {
 		t.Fatalf("the example is not admitted under its pinned digest: %+v", f)
+	}
+}
+
+// Claim: the example file is the published genuine statement and this signer
+// derives for it the digest the published format states: 1491 bytes, a
+// 1515-byte preimage, the literal SHA-256 above, under which the published
+// signature verifies with the published approver key. Beside it, a statement
+// with another gate_id is DIGEST_BINDING under the published digest, and the
+// published signature does not verify over that statement's own digest.
+// Limit: this proves equality for this one statement, not for every input.
+func TestStaticGatePublishedGenuine(t *testing.T) {
+	statement, _ := gateExample(t)
+	if len(statement) != 1491 || len(staticGatePreimage(statement)) != 1515 {
+		t.Fatalf("the example is %d bytes with a %d-byte preimage, want 1491 and 1515", len(statement), len(staticGatePreimage(statement)))
+	}
+	g, f := checkStaticGate(statement, publishedDigest, publishedLabel)
+	if f != nil {
+		t.Fatalf("the published statement is not admitted under the published digest: %+v", f)
+	}
+	if got := hex.EncodeToString(g.digest); got != publishedDigest || g.approverKey != publishedApproverKey {
+		t.Fatalf("digest %s, approver key %s", got, g.approverKey)
+	}
+	if !sigValid(publishedApproverKey, hex.EncodeToString(g.digest), publishedSignature) {
+		t.Fatal("the published signature does not verify over the digest this signer derives")
+	}
+	other := replaceOnce(t, statement, `"gate_id":"00112233445566778899aabbccddeeff"`, `"gate_id":"ffeeddccbbaa99887766554433221100"`)
+	if _, f := checkStaticGate(other, publishedDigest, publishedLabel); f == nil || f.Code != "DIGEST_BINDING" {
+		t.Fatalf("another statement under the published digest: %+v, want DIGEST_BINDING", f)
+	}
+	g, f = checkStaticGate(other, gateDigest(other), publishedLabel)
+	if f != nil {
+		t.Fatalf("control: the neighbouring statement is not admitted under its own digest: %+v", f)
+	}
+	if sigValid(publishedApproverKey, hex.EncodeToString(g.digest), publishedSignature) {
+		t.Fatal("the published signature verifies over another statement")
+	}
+}
+
+// Claim: the example shows the values the published examples show: the caller
+// and worker generations are the two literal strings of exactly 32 lowercase
+// hex digits, and its five UIDs are the literals 38600..38604, inside
+// 30000..59999. The two predicates are held against known violations (the
+// earlier example's "g-example-1" and 28601, uppercase hex, 29999, 60000)
+// beside the bounds 30000 and 59999. source.generation stays "s-example-1" in
+// the published example and is not held to the hex shape. Read with an
+// independent JSON decoder, not the signer's reader.
+func TestStaticGateExampleValues(t *testing.T) {
+	example, _ := gateExample(t)
+	var doc struct {
+		Association struct {
+			CallerGeneration string `json:"caller_generation"`
+			CallerUID        int64  `json:"caller_uid"`
+		} `json:"association"`
+		Dispatcher struct {
+			ServiceUID int64 `json:"service_uid"`
+			Worker     struct {
+				Generation string `json:"generation"`
+				UID        int64  `json:"uid"`
+			} `json:"worker"`
+		} `json:"dispatcher"`
+		Keymaker struct {
+			ServiceUID int64 `json:"service_uid"`
+		} `json:"keymaker"`
+		Source struct {
+			ServiceUID int64 `json:"service_uid"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(example, &doc); err != nil {
+		t.Fatal(err)
+	}
+	generation := func(s string) bool { return len(s) == 32 && strings.Trim(s, "0123456789abcdef") == "" }
+	managed := func(uid int64) bool { return uid >= 30000 && uid <= 59999 }
+	if generation("g-example-1") || generation("0123456789ABCDEF0123456789ABCDEF") || generation("0123456789abcdef0123456789abcde") || managed(28601) || managed(29999) || managed(60000) || !managed(30000) || !managed(59999) {
+		t.Fatal("control: a predicate admits a known violation or refuses a bound")
+	}
+	generations := []string{doc.Association.CallerGeneration, doc.Dispatcher.Worker.Generation}
+	if !slices.Equal(generations, []string{"0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210"}) {
+		t.Fatalf("example generations %q", generations)
+	}
+	for _, s := range generations {
+		if !generation(s) {
+			t.Fatalf("example generation %q is not 32 lowercase hex digits", s)
+		}
+	}
+	uids := []int64{doc.Keymaker.ServiceUID, doc.Association.CallerUID, doc.Dispatcher.ServiceUID, doc.Dispatcher.Worker.UID, doc.Source.ServiceUID}
+	if !slices.Equal(uids, []int64{38600, 38601, 38602, 38603, 38604}) {
+		t.Fatalf("example UIDs %v", uids)
+	}
+	for _, uid := range uids {
+		if !managed(uid) {
+			t.Fatalf("example UID %d is outside 30000..59999", uid)
+		}
+	}
+}
+
+// Claim: every row of the published vector file gets from this signer's
+// statement check the verdict its row class requires. (1) Each of the 21
+// passing rows is admitted and yields the digest the row states. (2) Each of
+// the 84 rows whose published checks name an encoding or form cause (size,
+// codec, canonical, depth, members, fixed, shape) is STATIC_GATE_FORM, also
+// through the whole command, before anything is shown and before any secret
+// is read. (3) Each of the 6 rows refused only for the window width is
+// STATIC_GATE_WINDOW. (4) The other 69 rows are refused by the reference for
+// a consumer-side input the signer does not hold (key pin, digest pin, wire
+// signature, machine-id, clock, class, expected section or association
+// bytes): out of scope; their statements are admitted, except the two that
+// name an approver.key off the curve, which this signer refuses as
+// STATIC_GATE_FORM. The class comes from the row's own expect and checks
+// members; the counts are the literals below. Each statement is checked under
+// the digest of its own bytes and the approver label it names, so neither the
+// digest binding nor the reserved-label rule decides a verdict.
+func TestStaticGatePublishedVectors(t *testing.T) {
+	raw, err := os.ReadFile("testdata/static-gate/published/vectors.json")
+	if err != nil {
+		t.Fatalf("the published vector file is not vendored: %v", err)
+	}
+	var rows []struct {
+		ID           string   `json:"id"`
+		Expect       string   `json:"expect"`
+		Checks       []string `json:"checks"`
+		StatementHex string   `json:"statement_hex"`
+		Inputs       struct {
+			StatementDigest string `json:"statement_digest"`
+		} `json:"inputs"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatal(err)
+	}
+	formCauses := []string{"size", "codec", "canonical", "depth", "members", "fixed", "shape"}
+	offCurve := []string{"signature-key-at-p", "signature-key-nonliftable"}
+	example, _ := gateExample(t)
+	counts := map[string]int{}
+	genuine := false
+	for _, row := range rows {
+		statement, err := hex.DecodeString(row.StatementHex)
+		if err != nil {
+			t.Fatalf("%s: statement_hex: %v", row.ID, err)
+		}
+		class, want := "consumer-side", ""
+		switch {
+		case row.Expect == "pass":
+			class = "pass"
+		case slices.ContainsFunc(row.Checks, func(c string) bool { return slices.Contains(formCauses, c) }):
+			class, want = "form", "STATIC_GATE_FORM"
+		case slices.Contains(row.Checks, "window_width"):
+			class, want = "window", "STATIC_GATE_WINDOW"
+		case slices.Contains(offCurve, row.ID):
+			want = "STATIC_GATE_FORM"
+		}
+		counts[class]++
+		if row.ID == "genuine-keymaker" {
+			genuine = bytes.Equal(statement, example) && row.Inputs.StatementDigest == publishedDigest
+		}
+		t.Run(row.ID, func(t *testing.T) {
+			label := publishedLabel
+			var named struct {
+				Approver struct {
+					Label string `json:"label"`
+				} `json:"approver"`
+			}
+			if json.Unmarshal(statement, &named) == nil && named.Approver.Label != "" {
+				label = named.Approver.Label
+			}
+			g, f := checkStaticGate(statement, gateDigest(statement), label)
+			got := ""
+			if f != nil {
+				got = f.Code
+			}
+			if got != want {
+				t.Fatalf("%s row: verdict %q, want %q (the reference: %s, checks %v)", class, got, want, row.Expect, row.Checks)
+			}
+			if class == "pass" && hex.EncodeToString(g.digest) != row.Inputs.StatementDigest {
+				t.Fatalf("digest %x, the row states %s", g.digest, row.Inputs.StatementDigest)
+			}
+			if class == "form" {
+				h := newGateKC(t, confirmWord, keyOther, keypolicy.CurrentSet)
+				e, code := h.signAs(gateLabel, gateRequest(statement))
+				refusedGate(t, h, e, code, "STATIC_GATE_FORM", 3)
+			}
+		})
+	}
+	if len(rows) != 180 || counts["pass"] != 21 || counts["form"] != 84 || counts["window"] != 6 || counts["consumer-side"] != 69 {
+		t.Fatalf("%d rows by class %v, want 180: pass 21, form 84, window 6, consumer-side 69", len(rows), counts)
+	}
+	if !genuine {
+		t.Fatal("the row genuine-keymaker is not the example statement under the published digest")
 	}
 }
 
@@ -225,50 +431,50 @@ func TestStaticGateDisplayCoversEveryPreimageField(t *testing.T) {
 	}
 }
 
-// Claim: the display knows no section. (1) A statement with an extra
-// top-level section that no code names, holding nested objects, an array, an
-// empty object and a member name with a dot, signs, and every value of that
-// section is shown by its path, the dotted name quoted so that it cannot pass
-// for a nested path; the section is listed among the sections. (2) The
-// source section is shown when present and its absence needs nothing: the
-// same statement without it signs and shows no source line. No value is
-// shortened: a 6000-byte value is shown in full.
+// Claim: the display knows no section content. (1) A section whose members no
+// code names, holding nested objects, an array, an empty object and a member
+// name with a dot, signs, and every value of it is shown by its path, the
+// dotted name quoted so that it cannot pass for a nested path; the lines of
+// every other member are unchanged and the top-level members are the 14 of
+// the format. (2) The source section is shown value by value. (3) No value is
+// shortened: a 6000-byte value inside a section is shown in full. The
+// top-level member set itself is closed: TestStaticGateRefusals holds the
+// unknown, missing and duplicate top-level members.
 func TestStaticGateDisplayUnknownSection(t *testing.T) {
 	base := gateStatement(t, keyOther)
-	t.Run("late-section", func(t *testing.T) {
-		statement := replaceOnce(t, base, `,"v":1}`, `,"v":1,"zz_late":{"a_list":[1,"two",{}],"nested":{"deep":{"deeper":"x"}},"odd.name":"y"}}`)
+	t.Run("unnamed-section-content", func(t *testing.T) {
+		statement := replaceOnce(t, base, `"broker_time":{"example_hold_seconds":30,"example_in_flight":1}`, `"broker_time":{"a_list":[1,"two",{}],"nested":{"deep":{"deeper":"x"}},"odd.name":"y"}`)
 		shown, _ := signGate(t, statement)
-		for _, l := range []string{`zz_late.a_list[0] = 1`, `zz_late.a_list[1] = "two"`, `zz_late.a_list[2] = {}`, `zz_late.nested.deep.deeper = "x"`, `zz_late["odd.name"] = "y"`} {
+		for _, l := range []string{`broker_time.a_list[0] = 1`, `broker_time.a_list[1] = "two"`, `broker_time.a_list[2] = {}`, `broker_time.nested.deep.deeper = "x"`, `broker_time["odd.name"] = "y"`} {
 			if !strings.Contains(shown, "\n    "+l+"\n") {
-				t.Fatalf("display lacks the unknown section's value %q", l)
+				t.Fatalf("display lacks the section's value %q", l)
 			}
 		}
 		plain, _ := signGate(t, base)
-		before := displayBlock(plain, "Statement members  : all 29 values of the statement by path, in the order of the signed bytes")
-		after := displayBlock(shown, "Statement members  : all 34 values of the statement by path, in the order of the signed bytes")
-		if len(before) != 29 || len(after) != 34 || !slices.Equal(after[:29], before) {
-			t.Fatalf("the unknown section changed other lines or the count:\n got %q", after)
+		before := displayBlock(plain, "Statement members  : all 30 values of the statement by path, in the order of the signed bytes")
+		after := displayBlock(shown, "Statement members  : all 33 values of the statement by path, in the order of the signed bytes")
+		outside := func(lines []string) []string {
+			return slices.DeleteFunc(slices.Clone(lines), func(l string) bool { return strings.HasPrefix(l, "broker_time") })
 		}
-		if !strings.Contains(shown, "\n  Sections, 15 top-level members, each shown in full below: approver, association, broker_d5, broker_time, dispatcher, gate_id, host, keymaker, kind, milestone, not_after, not_before, source, v, zz_late\n") {
-			t.Fatal("the unknown section is not listed among the sections")
+		if len(before) != 30 || len(after) != 33 || len(outside(before)) != 28 || !slices.Equal(outside(after), outside(before)) {
+			t.Fatalf("the section content changed other lines or the count:\n got %q", after)
+		}
+		if !strings.Contains(shown, "\n  Sections, 14 top-level members, each shown in full below: approver, association, broker_d5, broker_time, dispatcher, gate_id, host, keymaker, kind, milestone, not_after, not_before, source, v\n") {
+			t.Fatal("the top-level members are not listed")
 		}
 	})
-	t.Run("source-present-or-absent", func(t *testing.T) {
-		with, _ := signGate(t, base)
-		for _, l := range []string{`source.config_sha256 = "` + strings.Repeat("a", 64) + `"`, `source.generation = "s-example-1"`, `source.service_uid = 28604`} {
-			if !strings.Contains(with, "\n    "+l+"\n") {
+	t.Run("source-shown", func(t *testing.T) {
+		shown, _ := signGate(t, base)
+		for _, l := range []string{`source.config_sha256 = "` + strings.Repeat("a", 64) + `"`, `source.generation = "s-example-1"`, `source.service_uid = 38604`} {
+			if !strings.Contains(shown, "\n    "+l+"\n") {
 				t.Fatalf("display lacks %q", l)
 			}
-		}
-		without, _ := signGate(t, replaceOnce(t, base, `"source":{"config_sha256":"`+strings.Repeat("a", 64)+`","generation":"s-example-1","service_uid":28604},`, ``))
-		if strings.Contains(without, "source") || len(displayBlock(without, "Statement members  : all 26 values of the statement by path, in the order of the signed bytes")) != 26 {
-			t.Fatal("a statement without the source section is not shown as its own 26 values")
 		}
 	})
 	t.Run("long-value-in-full", func(t *testing.T) {
 		long := strings.Repeat("0123456789", 600)
-		shown, _ := signGate(t, replaceOnce(t, base, `,"v":1}`, `,"v":1,"zz_long":"`+long+`"}`))
-		if !strings.Contains(shown, "\n    zz_long = \""+long+"\"\n") {
+		shown, _ := signGate(t, replaceOnce(t, base, `"example_in_flight":1}`, `"example_in_flight":1,"zz_long":"`+long+`"}`))
+		if !strings.Contains(shown, "\n    broker_time.zz_long = \""+long+"\"\n") {
 			t.Fatal("a long value is not shown in full")
 		}
 	})
@@ -283,12 +489,12 @@ func TestStaticGateScopeText(t *testing.T) {
 	base := gateStatement(t, keyOther)
 	want := []string{
 		"One statement of kind swarma-s7 static-gate/1, version 1.",
-		"Host: only the machine whose machine-id has the SHA-256 " + strings.Repeat("1", 64) + ".",
+		"Host: only the machine whose machine-id has the SHA-256 6ed6653dba3d6aee8110c6e23de37f15c609b8a6e29aa164d1acace604e5cb7e.",
 		"Window: not before 2026-11-17T00:00:00Z, not after 2026-11-19T00:00:00Z; length 48h0m0s, the limit is 72h0m0s.",
 		"Caller association, 3 value(s), exactly as signed:",
-		`  - association.caller_generation = "g-example-1"`,
+		`  - association.caller_generation = "0123456789abcdef0123456789abcdef"`,
 		`  - association.caller_key = "ed25519:iIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg"`,
-		"  - association.caller_uid = 28601",
+		"  - association.caller_uid = 38601",
 		"Sections, 14 top-level members, each shown in full below: approver, association, broker_d5, broker_time, dispatcher, gate_id, host, keymaker, kind, milestone, not_after, not_before, source, v",
 	}
 	shown, _ := signGate(t, base)
@@ -298,23 +504,29 @@ func TestStaticGateScopeText(t *testing.T) {
 	if !strings.Contains(shown, "\nSCOPE TEXT         : worded by this signer from the statement bytes only; no wording comes from the request\n") {
 		t.Fatal("display does not state where the scope text comes from")
 	}
-	shown, _ = signGate(t, replaceOnce(t, base, `"caller_uid":28601`, `"caller_uid":28699`))
-	want[6] = "  - association.caller_uid = 28699"
+	shown, _ = signGate(t, replaceOnce(t, base, `"caller_uid":38601`, `"caller_uid":38699`))
+	want[6] = "  - association.caller_uid = 38699"
 	if got := linesUnder(shown, "SCOPE TEXT         : ", "  "); !slices.Equal(got, want) {
 		t.Fatalf("scope text after one changed member:\n got %q\nwant %q", got, want)
 	}
 }
 
 // Claim: the limits are inclusive where the format says "at most". A
-// preimage of exactly 8192 bytes, a window of exactly 72 h and a statement
-// nested exactly 8 deep each sign. They are the valid controls beside the
-// 8193-byte, 72 h + 1 s and depth-9 refusals of TestStaticGateRefusals.
+// preimage of exactly 8192 bytes, a window of exactly 72 h, a statement
+// nested exactly 8 deep, the integers 2^53-1 and -(2^53-1) inside a section,
+// and the caller UIDs 0 and 4294967295 each sign. They are the valid controls
+// beside the 8193-byte, 72 h + 1 s, depth-9, 2^53, -(2^53), -1 and 2^32
+// refusals of TestStaticGateRefusals.
 func TestStaticGateBoundaries(t *testing.T) {
 	base := gateStatement(t, keyOther)
 	for name, statement := range map[string][]byte{
-		"preimage-8192-bytes": padGate(t, base, 8192),
-		"window-72h":          replaceOnce(t, base, `"not_after":"2026-11-19T00:00:00Z"`, `"not_after":"2026-11-20T00:00:00Z"`),
-		"depth-8":             replaceOnce(t, base, `,"v":1}`, `,"v":1,"zz":[[[[[[[1]]]]]]]}`),
+		"preimage-8192-bytes":  padGate(t, base, 8192),
+		"window-72h":           replaceOnce(t, base, `"not_after":"2026-11-19T00:00:00Z"`, `"not_after":"2026-11-20T00:00:00Z"`),
+		"depth-8":              replaceOnce(t, base, `"example_in_flight":1}`, `"example_in_flight":[[[[[[1]]]]]]}`),
+		"integer-2^53-1":       replaceOnce(t, base, `"example_in_flight":1}`, `"example_in_flight":9007199254740991}`),
+		"integer-minus-2^53-1": replaceOnce(t, base, `"example_in_flight":1}`, `"example_in_flight":-9007199254740991}`),
+		"caller-uid-0":         replaceOnce(t, base, `"caller_uid":38601`, `"caller_uid":0`),
+		"caller-uid-2^32-1":    replaceOnce(t, base, `"caller_uid":38601`, `"caller_uid":4294967295`),
 	} {
 		t.Run(name, func(t *testing.T) { signGate(t, statement) })
 	}
@@ -338,8 +550,10 @@ func TestStaticGateRefusals(t *testing.T) {
 	digest := func(d string) func(*StaticGateSignRequest) {
 		return func(r *StaticGateSignRequest) { r.Digest = d }
 	}
-	association := `"association":{"caller_generation":"g-example-1","caller_key":"ed25519:iIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg","caller_uid":28601},`
+	association := `"association":{"caller_generation":"0123456789abcdef0123456789abcdef","caller_key":"` + gateCallerKey + `","caller_uid":38601},`
 	approverKey := `"key":"` + testsigner_public(t, keyOther) + `"`
+	brokerD5 := `"broker_d5":{"example_acknowledged_head":"` + strings.Repeat("8", 64) + `"}`
+	source := `"source":{"config_sha256":"` + strings.Repeat("a", 64) + `","generation":"s-example-1","service_uid":38604},`
 	cases := []struct {
 		name, want string
 		exit       int
@@ -362,9 +576,39 @@ func TestStaticGateRefusals(t *testing.T) {
 		{"non-canonical-final-line-feed", "STATIC_GATE_FORM", 3, bytesOf(append(slices.Clone(base), '\n'))},
 		{"duplicate-member", "STATIC_GATE_FORM", 3, swap(`,"v":1}`, `,"v":1,"v":1}`)},
 		{"non-integer-number", "STATIC_GATE_FORM", 3, swap(`"v":1}`, `"v":1.0}`)},
-		{"exponent-number", "STATIC_GATE_FORM", 3, swap(`"caller_uid":28601`, `"caller_uid":2.8601e4`)},
-		{"depth-9", "STATIC_GATE_FORM", 3, swap(`,"v":1}`, `,"v":1,"zz":[[[[[[[[1]]]]]]]]}`)},
+		{"exponent-number", "STATIC_GATE_FORM", 3, swap(`"caller_uid":38601`, `"caller_uid":3.8601e4`)},
+		{"depth-9", "STATIC_GATE_FORM", 3, swap(`"example_in_flight":1}`, `"example_in_flight":[[[[[[[1]]]]]]]}`)},
 		{"not-an-object", "STATIC_GATE_FORM", 3, bytesOf([]byte(`[]`))},
+		// An integer one past either end of -(2^53-1)..2^53-1 is not CCJ-1.
+		// The ends themselves sign in TestStaticGateBoundaries.
+		{"integer-2^53", "STATIC_GATE_FORM", 3, swap(`"example_in_flight":1}`, `"example_in_flight":9007199254740992}`)},
+		{"integer-minus-2^53", "STATIC_GATE_FORM", 3, swap(`"example_in_flight":1}`, `"example_in_flight":-9007199254740992}`)},
+		// The closed top-level member set: an unknown member, a missing
+		// member, one member under another name. The duplicate top-level
+		// member is duplicate-member above.
+		{"unknown-top-level-member", "STATIC_GATE_FORM", 3, swap(`,"v":1}`, `,"v":1,"zz_late":{"a":1}}`)},
+		{"missing-top-level-member-source", "STATIC_GATE_FORM", 3, swap(source, ``)},
+		{"missing-top-level-member-gate-id", "STATIC_GATE_FORM", 3, swap(`"gate_id":"00112233445566778899aabbccddeeff",`, ``)},
+		{"missing-top-level-member-milestone", "STATIC_GATE_FORM", 3, swap(`"milestone":"G1.0",`, ``)},
+		{"renamed-top-level-member", "STATIC_GATE_FORM", 3, swap(`"source":{`, `"sourcf":{`)},
+		// The fixed values and shapes of the members the format owns.
+		{"milestone-other", "STATIC_GATE_FORM", 3, swap(`"milestone":"G1.0"`, `"milestone":"G1.1"`)},
+		{"gate-id-uppercase", "STATIC_GATE_FORM", 3, swap(`"gate_id":"00112233445566778899aabbccddeeff"`, `"gate_id":"00112233445566778899AABBCCDDEEFF"`)},
+		{"gate-id-31-digits", "STATIC_GATE_FORM", 3, swap(`"gate_id":"00112233445566778899aabbccddeeff"`, `"gate_id":"00112233445566778899aabbccddeef"`)},
+		{"host-unknown-member", "STATIC_GATE_FORM", 3, swap(`"host":{"label":"host-a",`, `"host":{"extra":1,"label":"host-a",`)},
+		{"host-label-empty", "STATIC_GATE_FORM", 3, swap(`"label":"host-a"`, `"label":""`)},
+		{"approver-unknown-member", "STATIC_GATE_FORM", 3, swap(`"approver":{"alg":"bip340",`, `"approver":{"alg":"bip340","extra":1,`)},
+		{"approver-label-empty", "STATIC_GATE_FORM", 3, swap(`"label":"swarma-static-gate-g1"`, `"label":""`)},
+		{"association-unknown-member", "STATIC_GATE_FORM", 3, swap(`"caller_uid":38601}`, `"caller_uid":38601,"registration":1}`)},
+		{"association-without-caller-key", "STATIC_GATE_FORM", 3, swap(`"caller_key":"`+gateCallerKey+`",`, ``)},
+		{"caller-generation-empty", "STATIC_GATE_FORM", 3, swap(`"caller_generation":"0123456789abcdef0123456789abcdef"`, `"caller_generation":""`)},
+		{"caller-key-without-prefix", "STATIC_GATE_FORM", 3, swap(`"caller_key":"ed25519:`, `"caller_key":"`)},
+		{"caller-key-padded", "STATIC_GATE_FORM", 3, swap(`"caller_key":"`+gateCallerKey+`"`, `"caller_key":"`+gateCallerKey+`="`)},
+		{"caller-uid-negative", "STATIC_GATE_FORM", 3, swap(`"caller_uid":38601`, `"caller_uid":-1`)},
+		{"caller-uid-2^32", "STATIC_GATE_FORM", 3, swap(`"caller_uid":38601`, `"caller_uid":4294967296`)},
+		{"caller-uid-string", "STATIC_GATE_FORM", 3, swap(`"caller_uid":38601`, `"caller_uid":"38601"`)},
+		{"section-not-an-object", "STATIC_GATE_FORM", 3, swap(brokerD5, `"broker_d5":"8888"`)},
+		{"section-empty", "STATIC_GATE_FORM", 3, swap(brokerD5, `"broker_d5":{}`)},
 		// Size: one byte over the limit.
 		{"preimage-8193-bytes", "STATIC_GATE_FORM", 3, bytesOf(padGate(t, base, 8193))},
 		// The members the signer itself relies on.
@@ -374,7 +618,7 @@ func TestStaticGateRefusals(t *testing.T) {
 		{"approver-key-not-on-the-curve", "STATIC_GATE_FORM", 3, swap(approverKey, `"key":"`+strings.Repeat("5", 64)+`"`)},
 		{"association-absent", "STATIC_GATE_FORM", 3, swap(association, ``)},
 		{"association-empty", "STATIC_GATE_FORM", 3, swap(association, `"association":{},`)},
-		{"machine-id-not-hex", "STATIC_GATE_FORM", 3, swap(`"machine_id_sha256":"1111`, `"machine_id_sha256":"X111`)},
+		{"machine-id-not-hex", "STATIC_GATE_FORM", 3, swap(`"machine_id_sha256":"6ed6`, `"machine_id_sha256":"Xed6`)},
 		{"time-with-offset", "STATIC_GATE_FORM", 3, swap(`"not_after":"2026-11-19T00:00:00Z"`, `"not_after":"2026-11-19T00:00:00+00:00"`)},
 		{"time-with-fraction", "STATIC_GATE_FORM", 3, swap(`"not_after":"2026-11-19T00:00:00Z"`, `"not_after":"2026-11-19T00:00:00.5Z"`)},
 		// approver.label is not the label asked to sign.
@@ -622,8 +866,10 @@ func TestStaticGateConfirmationAndOutputs(t *testing.T) {
 // document stands beside refused spellings of the same or a neighbouring
 // value: whitespace, member order (by Unicode scalar, which differs from
 // UTF-16 order above the BMP), duplicate names, non-integers, non-shortest
-// integers, integers beyond 64 bits, escapes other than the prescribed ones,
-// trailing content, invalid UTF-8, and more than 8 nested containers.
+// integers, integers outside -(2^53-1)..2^53-1 (the two ends are admitted;
+// one past either end, the 64-bit ends and one past them are refused),
+// escapes other than the prescribed ones, trailing content, invalid UTF-8,
+// and more than 8 nested containers.
 func TestCCJ1Canonical(t *testing.T) {
 	for _, good := range []string{
 		`{}`,
@@ -632,7 +878,7 @@ func TestCCJ1Canonical(t *testing.T) {
 		`{"A":1,"a":2}`,
 		"{\"a\":\"\u00e9\\\"\\\\\\b\\f\\n\\r\\t\\u0001\\u001f\u007f/\"}",
 		"{\"a\":1,\"\u00e9\":2,\"\uff5e\":3,\"\U00010000\":4}",
-		`{"a":9223372036854775807,"b":-9223372036854775808}`,
+		`{"a":9007199254740991,"b":-9007199254740991}`,
 		`[[[[[[[[1]]]]]]]]`,
 	} {
 		if _, ok := ccjCanonical([]byte(good)); !ok {
@@ -645,7 +891,8 @@ func TestCCJ1Canonical(t *testing.T) {
 		"{\"\U00010000\":1,\"\uff5e\":2}",
 		`{"a":1,"a":1}`, `{"a":1,"a":2}`,
 		`{"a":1.0}`, `{"a":1e3}`, `{"a":1.5}`, `{"a":-0}`, `{"a":01}`, `{"a":+1}`,
-		`{"a":9223372036854775808}`,
+		`{"a":9007199254740992}`, `{"a":-9007199254740992}`,
+		`{"a":9223372036854775807}`, `{"a":-9223372036854775808}`, `{"a":9223372036854775808}`,
 		`{"a":"\u0041"}`, `{"a":"\/"}`, `{"a":"\u000a"}`, `{"a":"\u001F"}`, `{"a":"\u00e9"}`, `{"a":"\u007f"}`, `{"a":"\ud800"}`,
 		"{\"a\":\"\x01\"}", "{\"a\":\"\xff\"}",
 		`{"a":1}{}`, `{"a":1}1`, `{"a":1,}`, `{"a"}`, `{a:1}`,
