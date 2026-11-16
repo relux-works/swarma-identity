@@ -23,7 +23,7 @@ type Store struct {
 	items        map[string]item
 	publicItems  map[string][]byte
 	policies     map[string]keypolicy.Policy
-	Events       []string  // "preflight", "exists:<label>", "public:<label>", "create:<label>", "secret:<label>"
+	Events       []string  // "preflight", "exists:<label>", "public:<label>", "access:<label>", "create:<label>", "secret:<label>"
 	Reasons      []string  // the prompt reason of every secret read
 	PreflightErr error     // returned by Preflight when set
 	SecretErr    error     // returned by Secret when set
@@ -155,6 +155,7 @@ func (s *Store) Secret(label, reason string, dst *[32]byte, access keypolicy.Pol
 func (s *Store) Access(label string) (keypolicy.Policy, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.event("access:" + label)
 	if _, ok := s.publicItems[label]; !ok {
 		return "", keychain.ErrPublicNotFound
 	}

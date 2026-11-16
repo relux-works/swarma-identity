@@ -37,7 +37,7 @@ func TestKeychainInteractionRequiredKeygenSign(t *testing.T) {
 			t.Fatal("positive control did not return the requested verified signatures")
 		}
 	})
-	if h.count("secret:") != 3 || h.log[0] != "public:"+kcLabel || h.log[1] != "show" || h.log[2] != "confirm" || !strings.Contains(h.preKey, f.draft.Draft.ContractSHA256) {
+	if h.count("secret:") != 3 || len(h.log) < 4 || h.log[0] != "public:"+kcLabel || h.log[1] != "access:"+kcLabel || h.log[2] != "show" || h.log[3] != "confirm" || !strings.Contains(h.preKey, f.draft.Draft.ContractSHA256) {
 		t.Fatalf("display/confirmation/secret order: %v", h.log)
 	}
 	assertNoSecrets(t, append(h.blobs, direct))

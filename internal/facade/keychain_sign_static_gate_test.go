@@ -102,10 +102,11 @@ func signGate(t *testing.T, statement []byte) (string, StaticGateSignResult) {
 	if !h.keyRead || res.Digest != r.Digest || !sigValid(testsigner_public(t, keyOther), r.Digest, res.Signature) {
 		t.Fatalf("positive control did not sign the requested digest: %v", h.log)
 	}
-	// The whole trace, exactly: the public read that binds approver.key, the
-	// display, the confirmation, and only then the signing step, which reads
-	// the public key again and then the secret, as under sign/1 and sign/2.
-	wantOrder := []string{"public:" + gateLabel, "show", "confirm", "public:" + gateLabel, "secret:" + gateLabel}
+	// The whole trace, exactly: the public and access reads that bind
+	// approver.key and the policy, the display, the confirmation, and only
+	// then the signing step, which reads the public key again and then the
+	// secret, as under sign/1 and sign/2.
+	wantOrder := []string{"public:" + gateLabel, "access:" + gateLabel, "show", "confirm", "public:" + gateLabel, "secret:" + gateLabel}
 	if !slices.Equal(h.log, wantOrder) {
 		t.Fatalf("unexpected approval/secret ordering: %v", h.log)
 	}
@@ -113,8 +114,24 @@ func signGate(t *testing.T, statement []byte) (string, StaticGateSignResult) {
 }
 
 // refusedGate asserts one refusal with its exact code and exit status, and
-// that nothing was shown, nothing was confirmed and no secret was read.
+// that nothing was shown, nothing was confirmed, no secret was read and no
+// public key or access policy was read: the refusal came from validation,
+// which runs before any of them.
 func refusedGate(t *testing.T, h *kcHarness, e Envelope, code int, want string, exit int) {
+	t.Helper()
+	gateRefusal(t, h, e, code, want, exit, true)
+}
+
+// refusedGateAfterKeyRead is refusedGate for the refusals defined by the
+// stored key itself (KEY_MISMATCH and, at signing, STATIC_GATE_KEY_ACCESS):
+// the public and access reads that decide them run after validation, still
+// before anything is shown and before any secret is read.
+func refusedGateAfterKeyRead(t *testing.T, h *kcHarness, e Envelope, code int, want string, exit int) {
+	t.Helper()
+	gateRefusal(t, h, e, code, want, exit, false)
+}
+
+func gateRefusal(t *testing.T, h *kcHarness, e Envelope, code int, want string, exit int, beforeKey bool) {
 	t.Helper()
 	mustRefuse(t, e, code, want)
 	if code != exit {
@@ -122,6 +139,9 @@ func refusedGate(t *testing.T, h *kcHarness, e Envelope, code int, want string, 
 	}
 	if h.count("show") != 0 || h.count("confirm") != 0 || h.count("secret:") != 0 {
 		t.Fatalf("refused request reached the display or the key: %v", h.log)
+	}
+	if beforeKey && (h.count("public:") != 0 || h.count("access:") != 0) {
+		t.Fatalf("refused request read the public key or access policy before validation: %v", h.log)
 	}
 }
 
@@ -480,6 +500,32 @@ func TestStaticGateDisplayUnknownSection(t *testing.T) {
 	})
 }
 
+// Claim: a non-ASCII or control character in a displayed value or member name reaches the terminal only escaped, beside a plain ASCII value shown as itself.
+func TestStaticGateDisplayEscaping(t *testing.T) {
+	base := gateStatement(t, keyOther)
+	statement := replaceOnce(t, base, `"broker_time":{"example_hold_seconds":30,"example_in_flight":1}`, `"broker_time":{"example_hold_seconds":30,"example_in_flight":1,"zz_note":"café\u0001end","zz_oddé\u0001name":"y","zz_plain":"plain"}`)
+	shown, _ := signGate(t, statement)
+	for _, l := range []string{`broker_time.zz_note = "caf\u00e9\x01end"`, `broker_time["zz_odd\u00e9\x01name"] = "y"`, `broker_time.zz_plain = "plain"`} {
+		if !strings.Contains(shown, "\n    "+l+"\n") {
+			t.Fatalf("display lacks the escaped line %q", l)
+		}
+	}
+	if strings.Contains(shown, "é") || strings.Contains(shown, "\x01") {
+		t.Fatal("display carries a raw non-ASCII or control character")
+	}
+	var exact strings.Builder
+	for _, l := range displayBlock(shown, "  exact bytes      :") {
+		_, text, ok := strings.Cut(l, "  ")
+		if !ok {
+			t.Fatalf("exact-bytes line malformed: %q", l)
+		}
+		exact.WriteString(text)
+	}
+	if !strings.Contains(exact.String(), `\xc3\xa9`) {
+		t.Fatal("exact bytes do not show the non-ASCII bytes in \\xNN form")
+	}
+}
+
 // Claim: the scope text has one exact wording and is worded from the
 // statement alone: for the example it is the literal text below (the host
 // machine-id, the window with its length and the 72 h limit, every value of
@@ -644,8 +690,26 @@ func TestStaticGateRefusals(t *testing.T) {
 			r := gateRequest(base)
 			c.edit(&r)
 			e, code := h.signAs(gateLabel, r)
-			refusedGate(t, h, e, code, c.want, c.exit)
+			if c.want == "KEY_MISMATCH" {
+				refusedGateAfterKeyRead(t, h, e, code, c.want, c.exit)
+			} else {
+				refusedGate(t, h, e, code, c.want, c.exit)
+			}
 		})
+	}
+}
+
+// Claim: an all-zero host.machine_id_sha256 refuses with STATIC_GATE_FORM before the display and before any public, access or secret read, beside the unchanged statement, which signs.
+func TestStaticGateZeroMachineID(t *testing.T) {
+	base := gateStatement(t, keyOther)
+	signGate(t, base) // the valid control
+	zero := replaceOnce(t, base, `"machine_id_sha256":"6ed6653dba3d6aee8110c6e23de37f15c609b8a6e29aa164d1acace604e5cb7e"`, `"machine_id_sha256":"`+strings.Repeat("0", 64)+`"`)
+	h := newGateKC(t, confirmWord, keyOther, keypolicy.CurrentSet)
+	before := len(h.store.Events)
+	e, code := h.signAs(gateLabel, gateRequest(zero))
+	refusedGate(t, h, e, code, "STATIC_GATE_FORM", 3)
+	if len(h.log) != 0 || len(h.store.Events) != before {
+		t.Fatalf("zero machine-id reached the store or the terminal: %v", h.log)
 	}
 }
 
@@ -824,7 +888,26 @@ func TestStaticGateKeyAccessPolicy(t *testing.T) {
 	for _, access := range []keypolicy.Policy{keypolicy.Any, keypolicy.OrPasscode} {
 		h := newGateKC(t, confirmWord, keyOther, access)
 		e, code := h.signAs(gateLabel, gateRequest(base))
-		refusedGate(t, h, e, code, "STATIC_GATE_KEY_ACCESS", 3)
+		refusedGateAfterKeyRead(t, h, e, code, "STATIC_GATE_KEY_ACCESS", 3)
+	}
+}
+
+// Claim: when the access policy cannot be inspected, the display says so before the secret read and the statement still signs, beside the inspectable control, whose display has no such line.
+func TestStaticGateAccessInspectionDisclosure(t *testing.T) {
+	base := gateStatement(t, keyOther)
+	shown, _ := signGate(t, base) // the inspectable valid control
+	if strings.Contains(shown, "Native ACL flags") {
+		t.Fatal("inspectable control claims native ACL flags are unavailable")
+	}
+	h := newGateKC(t, confirmWord, keyOther, keypolicy.CurrentSet)
+	h.store.HideAccessInspection = true
+	e, code := h.signAs(gateLabel, gateRequest(base))
+	mustOK(t, e, code)
+	if !h.keyRead || !strings.Contains(h.preKey, "\nNative ACL flags   : unavailable through public Security APIs; authenticated policy metadata is checked before signing.\n") {
+		t.Fatal("uninspectable access policy was not disclosed before the secret read")
+	}
+	if !strings.Contains(h.preKey, "\nAccess policy      : biometry-current-set (this-device-only)\n") {
+		t.Fatal("access policy line missing beside the disclosure")
 	}
 }
 

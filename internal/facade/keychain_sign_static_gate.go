@@ -485,7 +485,7 @@ func checkStaticGate(statement []byte, digestHex, label string) (*staticGate, *F
 	notAfter, _ := root.text("not_after")
 	from, okFrom := staticGateTime(notBefore)
 	until, okUntil := staticGateTime(notAfter)
-	if alg != "bip340" || !xOnlyKey(key) || approverLabel == "" || hostLabel == "" || !lowerHex(machineID, 32) || !okFrom || !okUntil {
+	if alg != "bip340" || !xOnlyKey(key) || approverLabel == "" || hostLabel == "" || !lowerHex(machineID, 32) || machineID == strings.Repeat("0", 64) || !okFrom || !okUntil {
 		return nil, staticGateRefuse("STATIC_GATE_FORM")
 	}
 	if callerGeneration == "" || !staticGateCallerKey(callerKey) || !staticGateUID(callerUID) {

@@ -239,7 +239,7 @@ func TestOwnerReviewConsentDisplayContract(t *testing.T) {
 	if len(res.Signatures) != 1 || !sigValid(r.Draft.IssuerKey, r.ToSign[0].Digest, res.Signatures[0].Signature) {
 		t.Fatal("valid positive control did not issue matching grant signature")
 	}
-	if h.count("secret:") != 1 || len(h.log) != 5 || h.log[1] != "show" || h.log[2] != "confirm" {
+	if h.count("secret:") != 1 || len(h.log) != 6 || h.log[1] != "access:"+kcLabel || h.log[2] != "show" || h.log[3] != "confirm" {
 		t.Fatalf("unexpected approval/secret ordering: %v", h.log)
 	}
 	shown := h.term.shown.String()

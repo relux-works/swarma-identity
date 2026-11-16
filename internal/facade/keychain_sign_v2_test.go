@@ -291,7 +291,7 @@ func TestKeychainSignV2CompletesIssuance(t *testing.T) {
 	if len(res.Signatures) != 2 || res.SealSpend == nil || res.Key.XOnlyKey != x.draft.IssuerKey {
 		t.Fatalf("result %+v", res)
 	}
-	if h.count("secret:") != 3 || len(h.log) < 3 || h.log[0] != "public:"+kcLabel || h.log[1] != "show" || h.log[2] != "confirm" {
+	if h.count("secret:") != 3 || len(h.log) < 4 || h.log[0] != "public:"+kcLabel || h.log[1] != "access:"+kcLabel || h.log[2] != "show" || h.log[3] != "confirm" {
 		t.Fatalf("unexpected approval/secret ordering: %v", h.log)
 	}
 	vr := ContractVerifyV2Request{Schema: ContractVerifyV2Schema, ContractB64: x.draft.ContractB64, IssuerKey: x.draft.IssuerKey, LandlordSig: res.Signatures[0].Signature}
