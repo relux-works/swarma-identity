@@ -184,6 +184,8 @@ is still required for actual Touch ID/passcode and enrollment semantics.
 
 This is the request for a `/1` draft. A `/2` draft from `grant draft-v2` needs `swarma-keychain/sign/2`, described [below](#swarma-keychainsign2-the-depth-zero-swarma-trust-contract2-draft); the two do not mix.
 
+A `swarma-s7 static-gate/1` statement is not a grant request: it has its own schema, `swarma-keychain/sign-static-gate/1`, and its own key, described [further below](#swarma-keychainsign-static-gate1-one-swarma-s7-static-gate1-statement). The label `swarma-static-gate-g1` is reserved for that key, and a `sign/1` or `sign/2` request under it is refused with `KEY_PURPOSE`.
+
 - `to_sign` entries are copied from PR 8's output: `grant draft` and `grant consent` give `contract_sha256`, and `grant sign` stage `grant_hash` gives `grant_signing_hash`. Only `signer:"landlord"` entries are accepted, and their key must be this item's key. The draft's `issuer_key` must also be this key, otherwise the request is refused with `KEY_MISMATCH`.
 - `seal_spend` is optional and takes exactly one of two forms:
   - `tx_hex` with one prevout per input. A legacy sighash does not commit to amounts, so the display marks those amounts as supplied by the request. A prevout may carry `prev_tx_hex`, the full previous transaction; it must hash to the input's txid, and its output must have exactly the supplied script and amount (`SEAL_SPEND_PREVOUTS` otherwise). The display then marks that amount as read from the previous transaction.
@@ -291,6 +293,79 @@ The members, the scope text and the signature sections all stand above the scope
 **What the scope text says about a bound document.** Only what this signer establishes: the document is bound by its SHA-256, the contract binds it by that hash only, it is shown in full, and this signer does not interpret it. When `land` or `spend` is granted beside a document, one more line says that this signer checks no landing and no payment against the document and that the land and spend terms are signed as they stand. The text does not say that the document narrows the terms: no step of this tool compares an instruction with the document, and whether an executor honours it is outside this command.
 
 `TestKeychainDisplayCoversEveryPreimageFieldV2` takes the output bytes of `grant draft-v2` and `grant sign`, and requires the transcript at the first secret read to show the fifteen members in order with their values, exactly the committed fields of the hashed bytes, those bytes verbatim, and their SHA-256 as the digest; it also pins the landlord value statement, the stated bytes and the closing line. `TestKeychainV2ScopeText` fixes the wording for every action set, with and without a bound document. `TestKeychainSignV2Refusals`, `TestKeychainSignV2ScopeDocumentRefusals`, `TestKeychainSignV2WrongStoreKey` and `TestKeychainSignCrossSchema` hold each refusal beside a valid request. `TestKeychainSignV2ScopeDocumentBounds` signs a document at each bound and refuses one byte or one line more. `TestKeychainSignV2StatedValueIsNotTheChainValue` changes the fixture node's landlord value to one with `holders`: a request that states the earlier bytes still signs here, with the unverified statement on the display, and `grant sign` then refuses. The fake terminal of these tests is an unbounded buffer; what a physical terminal keeps in its scrollback is checked only by the dry run on the real machine.
+
+#### `swarma-keychain/sign-static-gate/1`: one `swarma-s7 static-gate/1` statement
+
+A static-gate statement G is one canonical JSON object that a dedicated key signs once for a bounded window. It is not a grant, and the grant key never signs it (LIP-0029 O10.2: the grant key signs no statement and no configuration). `keychain sign` takes it only under its own request schema and only with its own key:
+
+```json
+{
+  "schema": "swarma-keychain/sign-static-gate/1",
+  "purpose": "static_gate",
+  "statement_b64": "<canonical standard base64 of the exact CCJ-1 bytes of G>",
+  "digest": "<64 lowercase hex: the SHA-256 the caller expects to be signed>"
+}
+```
+
+```sh
+"$KEYCHAIN_CLI" keychain sign --label swarma-static-gate-g1 --request .temp/static-gate-sign.json --json
+```
+
+**Why a third schema.** As with `sign/2`, one schema string names one request shape and one display. The top-level `schema` member, read by its exact name, is the only discriminator: nothing is inferred from other members. The shape is closed, so a static-gate request that carries `draft`, `to_sign`, `seal_spend` or any other member is `BAD_INPUT`, and so is a `sign/1` or `sign/2` request that carries `statement_b64`, `purpose` or `digest`. An unknown schema string, `swarma-keychain/sign-static-gate/2` included, is `BAD_INPUT`. `sign/1` and `sign/2` requests are read, checked and shown exactly as before.
+
+**The preimage and the digest.** The signer rebuilds the preimage itself and never takes it from the request:
+
+```text
+preimage = ASCII("swarma-s7 static-gate/1") || 0x0a || CCJ-1(G)      ; no final line feed, at most 8192 bytes
+digest   = SHA-256(preimage)
+sig      = BIP-340(static-gate key, digest)                          ; 64 bytes, lowercase hex
+```
+
+The request's `digest` must equal the rebuilt digest, otherwise the request is refused with `DIGEST_BINDING` before the display.
+
+**Canonical form (CCJ-1).** The statement bytes are parsed, encoded again and compared byte for byte; any difference is `STATIC_GATE_FORM`. The encoder sorts object names by Unicode scalar, writes no whitespace, writes integers in their shortest form and admits no other number. Duplicate names and more than 8 nested containers (the statement object counted as 1) are refused. Strings are written with `\"` and `\\`, with `\b \f \n \r \t`, with `\u00xx` in lowercase hex for every other character below U+0020, and with every other character as its UTF-8 bytes. The literals `true`, `false` and `null` are admitted and shown. Integers are limited to 64 bits.
+
+**Key separation.** The label `swarma-static-gate-g1` is reserved. The rule works in both directions and is applied before the display and before any Keychain read:
+
+| Request | `--label swarma-static-gate-g1` | any other label |
+| --- | --- | --- |
+| `sign-static-gate/1`, purpose `static_gate` | proceeds to the checks below | `KEY_PURPOSE` |
+| `sign/1` or `sign/2`: `contract_sha256`, `grant_signing_hash`, a seal spend, or any other entry | `KEY_PURPOSE` | as before |
+
+A label holds one key, and `keygen` creates a key and never imports one, so no key can serve both purposes. The static-gate key is created in its own `keygen` run under that label. Under that label `keygen` accepts only `biometry-current-set` (the default) and refuses any other `--access` value with `STATIC_GATE_KEY_ACCESS` before any store call. `keygen` prints a `p2pkh_address` for this key as for any other; the address has no use and must not be funded, because this key signs no spend.
+
+**Checks before the display.** All of these run before anything is shown and before any secret is read, in this order:
+
+| Condition | Code |
+| --- | --- |
+| The request is not the closed shape, `purpose` is not `static_gate`, or `statement_b64` is empty or not canonical standard base64 | `BAD_INPUT` |
+| The label is not `swarma-static-gate-g1` | `KEY_PURPOSE` |
+| The preimage is longer than 8192 bytes; the statement is not one canonical CCJ-1 object | `STATIC_GATE_FORM` |
+| `digest` is not the SHA-256 of the rebuilt preimage | `DIGEST_BINDING` |
+| `v` is not `1`, `kind` is not `swarma-s7 static-gate/1`, `approver.alg` is not `bip340`, `approver.key` is not a valid x-only key, `approver.label` is absent, `host.machine_id_sha256` is not 64 lowercase hex, `association` is absent or empty, or `not_before` or `not_after` is not RFC 3339 UTC in whole seconds ending in `Z` | `STATIC_GATE_FORM` |
+| `approver.label` is not the label asked to sign | `STATIC_GATE_LABEL` |
+| `not_after` is not later than `not_before`, or the window is longer than 72 hours | `STATIC_GATE_WINDOW` |
+| `approver.key` is not the key stored under the label | `KEY_MISMATCH` |
+| The stored key's recorded access policy is not `biometry-current-set` | `STATIC_GATE_KEY_ACCESS` |
+
+The signer checks only the members it relies on. It has no list of sections: it does not refuse an unknown section and does not require any section beyond those named above. Whether the member set is the closed set of the statement format, and whether each section has the expected values, is checked by each consumer of the statement. The signer does not compare the window with the clock of the Mac; the window is shown for the human to read.
+
+**The display.** Before the confirmation prompt the terminal shows, in this order:
+
+- the request schema, the purpose, the label, the access policy and the signing key, with the statement that it equals `approver.key`
+- the **scope text**, worded by the signer from the statement bytes alone: the kind and version; the host, as the SHA-256 of its machine-id; the window, its length and the 72-hour limit; every value of the caller association; and the names of all top-level members
+- **every value of the statement by its path**, read from the statement bytes, in the order of those bytes, with the number of values stated: `host.machine_id_sha256 = "…"`, `dispatcher.worker.uid = 28603`, array elements as `name[0]`, an empty object or array as a value of its own. A member name outside `[a-z0-9_]` is shown quoted in brackets (`["odd.name"]`), so a name cannot imitate a nested path. Strings are quoted with control and non-ASCII characters escaped. No value is shortened, and a section the signer has never seen is shown like any other
+- the digest, and the preimage verbatim, 64 bytes per line after the decimal offset: the tag, the line feed as `\x0a`, then the statement. A byte outside printable ASCII is shown as `\xNN`
+
+The approval is the exact line `SIGN` on `/dev/tty`, then one Touch ID authentication. The result is public data only:
+
+```json
+{"purpose":"static_gate","label":"swarma-static-gate-g1","xonly_key":"<64 hex>","access_policy":"biometry-current-set","statement_b64":"…","digest":"<64 hex>","signature":"<128 hex>"}
+```
+
+The envelope's `network` is empty: a statement names no chain network. The signature is verified against the stored key before it is output (`SIGNATURE_VERIFY` otherwise). The Keychain, terminal, confirmation and authentication codes of the table above (`KEY_NOT_FOUND`, `NO_TERMINAL`, `CONFIRMATION_DECLINED`, `AUTH_CANCELED`, `ACCESS_POLICY_MISMATCH` and the others) apply unchanged.
+
+`TestStaticGateExampleVector` rebuilds the preimage of the example statement in `internal/facade/testdata/static-gate/` and compares its SHA-256 with the digest pinned beside it, which was computed outside this code. `TestStaticGateDisplayCoversEveryPreimageField` decodes that statement with an independent JSON decoder and requires the transcript at the first secret read to show exactly its values, the hashed bytes verbatim and their SHA-256 as the digest. `TestStaticGateDisplayUnknownSection` adds a section no code names and finds every value of it on the display. `TestStaticGateScopeText` fixes the wording. `TestStaticGateRefusals`, `TestStaticGateKeySeparation`, `TestStaticGateCrossSchema` and `TestStaticGateKeyAccessPolicy` hold each refusal beside a valid request; `TestStaticGateBoundaries` signs at exactly 8192 bytes, 72 hours and depth 8. `TestCCJ1Canonical` and `TestCCJ1Leaves` fix the canonical form and the paths. All of them run on any platform with the in-memory test store. **Not covered by them:** the real Keychain item for this label, Touch ID, and the `keygen` sitting for the new key; these need the owner's signed-bundle run on the Mac, as for the grant key.
 
 ### `value build --grant-xonly HEX --social-descriptor FILE --json`
 

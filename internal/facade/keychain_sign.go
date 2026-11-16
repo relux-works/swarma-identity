@@ -143,6 +143,9 @@ func KeychainKeygen(deps keychainDeps, label, network string, access keypolicy.P
 	if _, ok := networkParams(network); !ok {
 		return nil, fail("BAD_INPUT")
 	}
+	if f := refuseStaticGateKeygen(label, access); f != nil {
+		return nil, f
+	}
 	if deps.signer == nil {
 		return nil, fail("UNSUPPORTED_CAPABILITY")
 	}
@@ -491,6 +494,11 @@ func (deps keychainDeps) sign(label string, r KeychainSignRequest) (*KeychainSig
 	if (r.Schema != KeychainSignSchema && !isV2) || (!isV2 && r.LandlordValueHex != nil) || !validLabel(label) {
 		return nil, "", fail("BAD_INPUT")
 	}
+	// The label reserved for the static-gate key signs no grant request
+	// (keychain_sign_static_gate.go).
+	if f := refuseStaticGateKeyForGrant(label); f != nil {
+		return nil, "", f
+	}
 	var (
 		raw []byte
 		tc  TrustContract
@@ -582,6 +590,11 @@ func (deps keychainDeps) sign(label string, r KeychainSignRequest) (*KeychainSig
 
 // keychainSignCommand runs keychain sign with its file input.
 func keychainSignCommand(deps keychainDeps, label, requestPath string) (string, any, *Failure) {
+	// A request whose schema is the static-gate one takes its own path; every
+	// other file is read and judged below exactly as before.
+	if result, f, handled := staticGateSignCommand(deps, label, requestPath); handled {
+		return "", result, f
+	}
 	var r KeychainSignRequest
 	if f := inputFile(requestPath, &r); f != nil {
 		return "", nil, f
