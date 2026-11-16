@@ -18,9 +18,21 @@ import (
 // confirmation, the digest binding (bindDigests) and the signing loop are the
 // ones of sign/1. This file adds only what the /2 terms need before the
 // display: its own admission gate, the fifteen members read from the signed
-// bytes, a scope text worded from those members alone, and the refusal of a
-// landlord value that is not the legacy one.
+// bytes, a scope text worded from those members alone, a bounded scope
+// document, and a check of the landlord value that the request states. That
+// value is never verified here: this command reads no chain.
 const KeychainSignV2Schema = "swarma-keychain/sign/2"
+
+// The scope document is free text that the human reads on a terminal before
+// approving. LIP-0014 section 3.3 sets no size for it and the /2 parser reads
+// none, so the signer sets its own bounds and refuses above them before the
+// display. The byte bound is the one the profile puts on the contract itself.
+// The line bound is needed beside it: a document of line feeds alone would
+// otherwise be one display line per byte.
+const (
+	signV2MaxScopeDocBytes = trustMaxBytes
+	signV2MaxScopeDocLines = 256
+)
 
 // contractMember is one top-level member of the signed contract: its name
 // and the exact octets of its value.
@@ -31,7 +43,7 @@ type contractMember struct{ name, value string }
 type signV2 struct {
 	contract TrustContractV2
 	members  []contractMember
-	value    []byte // the landlord value, exact octets
+	value    []byte // the landlord value as the request states it, exact octets
 	scopeDoc []byte // the separate scope text; nil when the contract binds none
 }
 
@@ -110,32 +122,55 @@ func admitV2Display(raw []byte, c TrustContractV2) ([]contractMember, string) {
 	return members, ""
 }
 
-// legacyLandlordValue admits only the landlord value that every v3 reader
-// accepts: the LIP-0004 shape, whose landlord binding has the single member
-// grant. A value with holders (LIP-0010 section 10) is refused: a reader that
-// does not know that member refuses the value, and with it every v3 grant of
-// the landlord, so a v3 grant must not be signed under it. The value is what
-// the request states; this command reads no chain, and grant sign compares
-// the on-chain value.
-func legacyLandlordValue(valueHex, issuer string) ([]byte, *Failure) {
+// statedValueRefuse is a refusal of the landlord value that the request
+// states. Its codes and its message name the stated value, so that it is not
+// read as a finding about the chain: grant sign returns LANDLORD_NOT_V3 and
+// LANDLORD_KEY_MISMATCH for the value it reads there.
+func statedValueRefuse(code string) *Failure {
+	return &Failure{Code: code, Message: "The request is refused before any key is read: the stated value of the landlord, which the request supplies and this signer does not compare with the chain, is not acceptable.", Exit: 3}
+}
+
+// statedLandlordValue judges the octets that the request supplies as the
+// landlord value, and nothing else. It admits them only in the shape every v3
+// reader accepts (LIP-0004: the landlord binding has the single member
+// grant) and only when their grant key is the draft's issuer key; a stated
+// value with holders (LIP-0010 section 10) is refused. This is a check of the
+// request's copy. Anyone who knows the public issuer key can write octets
+// that pass it, so passing establishes nothing about the landlord name's
+// current value: this command reads no chain, and the on-chain check belongs
+// to grant sign. The display says so.
+func statedLandlordValue(valueHex, issuer string) ([]byte, *Failure) {
 	value, err := hex.DecodeString(valueHex)
 	if err != nil || len(value) == 0 || hex.EncodeToString(value) != valueHex {
 		return nil, fail("BAD_INPUT")
 	}
 	v := classifyV3(value)
 	if v.role != "landlord" {
-		return nil, keychainRefuse("LANDLORD_NOT_V3")
+		return nil, statedValueRefuse("STATED_LANDLORD_VALUE_NOT_V3")
 	}
 	if v.grantKey != issuer {
-		return nil, keychainRefuse("LANDLORD_KEY_MISMATCH")
+		return nil, statedValueRefuse("STATED_LANDLORD_VALUE_KEY_MISMATCH")
 	}
 	return value, nil
+}
+
+// scopeDocLines splits the scope document after each line feed. Each element
+// is one line of the display; joined, they are the document's exact octets.
+func scopeDocLines(doc []byte) [][]byte {
+	var out [][]byte
+	for _, line := range bytes.SplitAfter(doc, []byte("\n")) {
+		if len(line) > 0 {
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 // checkSignV2 is the /2 counterpart of checkDraft for keychain sign. It
 // accepts only the /2 draft record, rebinds every draft field to the contract
 // with the checker that grant consent and grant sign use, and then applies
-// the signer's own gate and the landlord value rule.
+// the signer's own gate, the bounds of the scope document and the rule for
+// the stated landlord value.
 func checkSignV2(r KeychainSignRequest) ([]byte, *signV2, *Failure) {
 	d := r.Draft
 	if d.Schema != GrantRecordV2Schema || r.LandlordValueHex == nil {
@@ -157,7 +192,10 @@ func checkSignV2(r KeychainSignRequest) ([]byte, *signV2, *Failure) {
 	if code != "" || verifyScopeTextV2(c, doc) != "" {
 		return nil, nil, refuse("SCOPE_TEXT_HASH")
 	}
-	value, f := legacyLandlordValue(*r.LandlordValueHex, d.IssuerKey)
+	if len(doc) > signV2MaxScopeDocBytes || len(scopeDocLines(doc)) > signV2MaxScopeDocLines {
+		return nil, nil, keychainRefuse("SCOPE_TEXT_SIZE")
+	}
+	value, f := statedLandlordValue(*r.LandlordValueHex, d.IssuerKey)
 	if f != nil {
 		return nil, nil, f
 	}
@@ -192,6 +230,11 @@ var scopeActionsV2 = []struct{ name, granted, withheld string }{
 // contract that admitV2Display bound to the signed bytes: no member of the
 // request, no draft field and no free text enters it. The note is counted
 // and never quoted; the separate scope document is named by its hash only.
+// About that document the text states only what this signer establishes: the
+// contract binds it by hash, it is shown in full, and nothing here interprets
+// it or checks an action against it. Whether an executor honours the document
+// is outside this command, so the text does not say that it narrows anything.
+// The budget is in sat, the unit word of the grant fields and the seal spend.
 func scopeTextV2(c TrustContractV2) []string {
 	out := []string{fmt.Sprintf("The landlord %s lets the holder of the key %s direct its agent %s on network %s.", c.LandlordName, c.GranteeKey, c.AgentName, c.Network)}
 	for _, a := range scopeActionsV2 {
@@ -210,9 +253,9 @@ func scopeTextV2(c TrustContractV2) []string {
 		}
 	}
 	if c.SpendBudget == 0 {
-		out = append(out, "Spend budget: 0 atoms; no payment may be requested.")
+		out = append(out, "Spend budget: 0 sat; no payment may be requested.")
 	} else {
-		out = append(out, fmt.Sprintf("Spend budget: %d atoms in total, fees included.", c.SpendBudget))
+		out = append(out, fmt.Sprintf("Spend budget: %d sat in total, fees included.", c.SpendBudget))
 	}
 	out = append(out, fmt.Sprintf("Window: not before %d (%s), not after %d (%s).", c.NotBefore, utc(c.NotBefore), c.NotAfter, utc(c.NotAfter)))
 	out = append(out, "Delegation: depth 0; the grantee cannot delegate: no child grant may be issued under this grant.")
@@ -220,7 +263,10 @@ func scopeTextV2(c TrustContractV2) []string {
 	if c.ScopeTextSHA256 == "" {
 		out = append(out, "Scope document: none is bound.")
 	} else {
-		out = append(out, fmt.Sprintf("Scope document: one separate text is bound by its SHA-256 %s; it can only narrow the terms above.", c.ScopeTextSHA256))
+		out = append(out, fmt.Sprintf("Scope document: one separate text is bound by its SHA-256 %s. The contract binds it by that hash only; it is shown in full below; this signer does not interpret it.", c.ScopeTextSHA256))
+		if slices.Contains(c.Actions, "land") || slices.Contains(c.Actions, "spend") {
+			out = append(out, "Scope document beside land or spend: this signer checks no landing and no payment against the document; the land and spend terms above are signed as they stand.")
+		}
 	}
 	if c.Note == "" {
 		out = append(out, "Note: empty.")
@@ -232,7 +278,12 @@ func scopeTextV2(c TrustContractV2) []string {
 
 // renderSignRequestV2 is every field the human approves for a /2 request.
 // The confirmation covers exactly this text. The signature and seal-spend
-// sections are those of sign/1.
+// sections are those of sign/1. The scope document is the last block, after
+// the members, the scope text and the signature sections, and the closing
+// line under it, the last line before the prompt, repeats the contract
+// SHA-256 and every digest to be signed: whatever the document's length
+// within its bounds, the terms stand above it and the digests stand beside
+// the prompt.
 func renderSignRequestV2(r KeychainSignRequest, v2 *signV2, key KeychainPublic, items []signItem, spend *sealSpendPlan, inspectable bool) string {
 	d := r.Draft
 	var b strings.Builder
@@ -247,7 +298,7 @@ func renderSignRequestV2(r KeychainSignRequest, v2 *signV2, key KeychainPublic, 
 	w("Signing key x-only : %s\n", key.XOnlyKey)
 	w("Signing key P2PKH  : %s\n", key.P2PKHAddress)
 	w("Network            : %s (genesis %s)\n", d.Network, d.Genesis)
-	w("Landlord value     : %d bytes as stated by the request, not read from the chain; legacy form, no holders; its grant key is the signing key\n", len(v2.value))
+	w("Landlord value     : NOT VERIFIED BY THIS SIGNER. The %d bytes on the next line are the value stated by the request. This signer reads no chain and has not compared them with the current value of the landlord name; that check is the issuing command's (grant sign), which reads the chain.\n", len(v2.value))
 	w("  %s\n", escapeBytes(v2.value, false))
 	w("Landlord           : %s\n", d.LandlordName)
 	w("Agent              : %s\n", d.AgentName)
@@ -272,16 +323,6 @@ func renderSignRequestV2(r KeychainSignRequest, v2 *signV2, key KeychainPublic, 
 	for _, line := range scopeTextV2(v2.contract) {
 		w("  %s\n", line)
 	}
-	if v2.scopeDoc == nil {
-		w("Scope document     : none\n")
-	} else {
-		w("Scope document     : %d bytes of free text supplied with the draft; its SHA-256 %s equals member 11. Each line below ends at a line feed (\\x0a); other bytes outside printable ASCII, and the backslash, are \\xNN\n", len(v2.scopeDoc), sha256Hex(v2.scopeDoc))
-		for _, line := range bytes.SplitAfter(v2.scopeDoc, []byte("\n")) {
-			if len(line) > 0 {
-				w("    | %s\n", escapeBytes(line, true))
-			}
-		}
-	}
 	for i, it := range items {
 		w("Signature %d        : BIP-340, purpose %s\n", i+1, it.purpose)
 		w("  digest           : %x\n", it.digest)
@@ -299,5 +340,25 @@ func renderSignRequestV2(r KeychainSignRequest, v2 *signV2, key KeychainPublic, 
 	} else {
 		w("Each of the %d signature(s) asks for Touch ID separately.\n", n)
 	}
+	if v2.scopeDoc == nil {
+		w("Scope document     : none\n")
+	} else {
+		lines := scopeDocLines(v2.scopeDoc)
+		w("Scope document     : %d bytes of free text supplied with the draft; its SHA-256 %s equals member 11. It is shown in the %d line(s) below, at most %d bytes and %d lines. Each line below ends at a line feed (\\x0a); other bytes outside printable ASCII, and the backslash, are \\xNN\n", len(v2.scopeDoc), sha256Hex(v2.scopeDoc), len(lines), signV2MaxScopeDocBytes, signV2MaxScopeDocLines)
+		for _, line := range lines {
+			w("    | %s\n", escapeBytes(line, true))
+		}
+	}
+	w("Approval covers    : contract SHA-256 %s", d.ContractSHA256)
+	if v2.scopeDoc != nil {
+		w("; scope document SHA-256 %s (the members and the SCOPE TEXT stand above the document)", sha256Hex(v2.scopeDoc))
+	}
+	for _, it := range items {
+		w("; %s %x", it.purpose, it.digest)
+	}
+	if spend != nil {
+		w("; %s %x", PurposeSealSpend, spend.sighash)
+	}
+	w("\n")
 	return b.String()
 }

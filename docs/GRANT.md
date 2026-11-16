@@ -634,12 +634,18 @@ The grantee signs the same kind-8181 event shape. The landlord signs the raw
 retains `swarma-issue-v1` (LIP-0004 section 4). No `/2` signing prefix exists.
 
 The Mac `swarma-keychain keychain sign` takes this draft under the request
-schema `swarma-keychain/sign/2`, which also requires the landlord's current
-value (`landlord_value_hex`). It recomputes both landlord digests from the
-bytes it shows, shows all fifteen members in order with a scope text worded
-from them alone and the exact separate scope text, and refuses before the
-display a contract that is not a canonical depth-zero root and a landlord
-value that is not the legacy one, `holders` included
+schema `swarma-keychain/sign/2`, which also requires `landlord_value_hex`,
+the landlord value as the request states it. It recomputes both landlord
+digests from the bytes it shows, shows all fifteen members in order with a
+scope text worded from them alone and the exact separate scope text, and
+refuses before the display a contract that is not a canonical depth-zero
+root and a separate scope text of more than 8192 bytes or 256 lines
+(`SCOPE_TEXT_SIZE`). It reads no chain. It refuses stated landlord bytes
+that are not the legacy value, `holders` included, or that name another key
+(`STATED_LANDLORD_VALUE_NOT_V3`, `STATED_LANDLORD_VALUE_KEY_MISMATCH`), but
+that judges the request's copy only and is shown as unverified. The check
+of the landlord's current value is `grant sign`'s, which reads it from the
+node and refuses a value that is not the legacy one (`LANDLORD_NOT_V3`)
 ([KEYCHAIN.md](KEYCHAIN.md)). Passing a `/2` draft under
 `swarma-keychain/sign/1` still refuses as `BAD_INPUT`. Any other external
 signer must likewise render all fifteen members and the exact separate scope

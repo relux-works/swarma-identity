@@ -236,7 +236,7 @@ Refusal codes:
 {
   "schema": "swarma-keychain/sign/2",
   "draft": { "...": "the draft record from grant draft-v2 (swarma-trust/draft-record/2), with scope_text_b64 when the contract binds a text" },
-  "landlord_value_hex": "<the landlord name's current value, lowercase hex, as identity show or value build prints it>",
+  "landlord_value_hex": "<the landlord name's value as the preparer of the request read it, lowercase hex, as identity show or value build prints it; stated, not verified by this command>",
   "to_sign": [ {"signer":"landlord","key":"<x-only>","purpose":"contract_sha256","digest":"…"} ],
   "consent_event": { "...": "required for grant_signing_hash" },
   "landlord_sig": "required for grant_signing_hash",
@@ -257,28 +257,40 @@ Refusal codes:
 | An unknown or a duplicate top-level member | `CONTRACT_FIELD` |
 | Fifteen members with a profile string other than `swarma-trust-contract/2` | `CONTRACT_PROFILE` |
 | `delegate.depth` above 0, any non-empty part of the right, or a parent (`parent_grant_id`, `ordinal`) | `CONTRACT_DEPTH` |
-| The separate scope text is missing, unexpected or does not hash to member 11 | `SCOPE_TEXT_HASH` |
-| The landlord value is not the legacy v3 landlord value. This includes a value whose landlord binding carries `holders` (LIP-0010 section 10): a reader that does not know that member refuses the value and with it every v3 grant of the landlord, so no v3 grant is signed under it | `LANDLORD_NOT_V3` |
-| The landlord value's grant key is not the draft's `issuer_key` | `LANDLORD_KEY_MISMATCH` |
+| The separate scope text is missing, unexpected, not canonical base64 or does not hash to member 11 | `SCOPE_TEXT_HASH` |
+| The separate scope text is longer than 8192 bytes or has more than 256 lines (see below) | `SCOPE_TEXT_SIZE` |
+| The stated landlord value, that is the bytes of `landlord_value_hex`, is not the legacy v3 landlord value. This includes stated bytes whose landlord binding carries `holders` (LIP-0010 section 10) | `STATED_LANDLORD_VALUE_NOT_V3` |
+| The grant key in the stated landlord value is not the draft's `issuer_key` | `STATED_LANDLORD_VALUE_KEY_MISMATCH` |
 | A requested digest is not the SHA-256 of the bytes that will be shown, or the entry is not this key's | `DIGEST_BINDING`, `KEY_MISMATCH` |
 
 The other draft and consent codes of [GRANT.md](GRANT.md) apply unchanged (`CONTRACT_HASH`, `SCOPE_MISMATCH`, `BUDGET_MISMATCH`, `CONSENT_*`, `GRANT_FIELD`, `LANDLORD_SIGNATURE`).
 
-The landlord value is what the request states. This command reads no chain; `grant sign` compares the landlord's on-chain value and key. The display says so on the value's own line.
+**The landlord value is stated, not verified.** `landlord_value_hex` is whatever bytes the request carries. This command reads no chain, and nothing binds those bytes to the landlord name's current value: anyone who knows the public issuer key can write bytes that pass the two checks above. The checks therefore judge the request's copy only. They catch a preparer who faithfully copied a value that carries `holders` or names another key; they establish nothing about the landlord name. That is why the two codes and their message name the stated value and differ from `LANDLORD_NOT_V3` and `LANDLORD_KEY_MISMATCH`, which `grant sign` returns for the value it reads from the chain. The display states this on the value's own line and makes no statement about the form of the landlord's value.
+
+The check of the landlord's current value is the issuing command's. `grant sign` reads the agent and its landlord from the node under one tip observation and refuses a landlord value that is not the legacy one, `holders` included, at the `grant_hash` stage and again at completion, so no grant is completed under such a value. This does not undo a signature already made here: the `contract_sha256` signature that `keychain sign` returns is the landlord countersignature that `grant contract-verify` accepts offline under a supplied key, with no chain read. Before signing, compare the displayed bytes with a fresh `identity show` of the landlord name on a node you trust.
+
+**The scope document is bounded.** LIP-0014 section 3.3 sets no size for the separate scope text, and `grant draft-v2`, `grant consent` and `grant sign` accept any size the request file admits. `keychain sign` refuses, before the display, a document of more than 8192 bytes (the bound the profile puts on the contract itself) or of more than 256 lines; a line ends at a line feed or at the end of the text. The bounds are this signer's own choice: a longer document would scroll the terms out of a terminal's view before the prompt. A grant that binds a longer document cannot be signed with this command.
 
 **Digest binding.** As under `sign/1`: `contract_sha256` is recomputed as the SHA-256 of the exact `/2` contract bytes, and `grant_signing_hash` as the SHA-256 of `swarma-grant-v3` followed by the canonical grant, built from the draft, the verified consent event and the verified `landlord_sig`. Both byte strings are then shown as committed fields and verbatim.
 
 **The display.** Before the confirmation prompt the terminal shows, in this order:
 
 - the request schema and the draft record schema; the label, access policy, key and P2PKH address; the network and genesis
-- the landlord value in full, with the statement that the request supplied it
+- the landlord value, on a line of its own before the grant fields: `NOT VERIFIED BY THIS SIGNER`, the statement that the bytes are the value stated by the request, that this signer reads no chain and has not compared them with the landlord name's current value, and that this check is the issuing command's (`grant sign`); then the stated bytes in full
 - the grant fields: landlord, agent, grantee key and name, the derived v3 scope and budget, the window, the contract SHA-256 and the seal outpoint
 - **all fifteen members** of the contract in the order of LIP-0014 section 3, numbered, each with the exact octets of its value as they stand in the signed bytes (`delegate` as its whole object). No value is shortened
-- the **scope text**: plain language that this signer words from the typed members alone. It states the parties and the network; for each of `instruct`, `land`, `review` and `spend`, in that order, one `GRANTED` or `NOT GRANTED` line with the meaning of LIP-0013 section 2.2; the repositories; the spend budget in atoms; the window; `Delegation: depth 0; the grantee cannot delegate: no child grant may be issued under this grant.`; that the grant is a root; whether a scope document is bound, by its hash; and the length of the note. No draft field, request member, note text or document text enters this wording
-- the separate scope document, when the draft carries one: its length and SHA-256, then its exact octets in a block of its own, one line per line of the text, each prefixed `    | `. A byte outside printable ASCII, the line feed and the backslash included, is shown as `\xNN`, so the document cannot draw a line that looks like another part of the display
-- each signature and the seal spend, exactly as under `sign/1`
+- the **scope text**: plain language that this signer words from the typed members alone. It states the parties and the network; for each of `instruct`, `land`, `review` and `spend`, in that order, one `GRANTED` or `NOT GRANTED` line with the meaning of LIP-0013 section 2.2; the repositories; the spend budget; the window; `Delegation: depth 0; the grantee cannot delegate: no child grant may be issued under this grant.`; that the grant is a root; whether a scope document is bound; and the length of the note. No draft field, request member, note text or document text enters this wording
+- each signature and the seal spend, exactly as under `sign/1`, and the line that says how each signature is authenticated
+- the separate scope document, when the draft carries one, as the last block: its length, SHA-256 and number of lines, then its exact octets in a block of its own, one line per line of the text, each prefixed `    | `. A byte outside printable ASCII, the line feed and the backslash included, is shown as `\xNN`, so the document cannot draw a line that looks like another part of the display
+- the closing line `Approval covers`, the last line before the prompt: the contract SHA-256, the document's SHA-256 when one is bound, and each digest to be signed with its purpose (the seal-spend sighash included)
 
-`TestKeychainDisplayCoversEveryPreimageFieldV2` takes the output bytes of `grant draft-v2` and `grant sign`, and requires the transcript at the first secret read to show the fifteen members in order with their values, exactly the committed fields of the hashed bytes, those bytes verbatim, and their SHA-256 as the digest. `TestKeychainV2ScopeText` fixes the wording for every action set. `TestKeychainSignV2Refusals` and `TestKeychainSignCrossSchema` hold each refusal beside a valid request.
+The members, the scope text and the signature sections all stand above the scope document, and the document is bounded in bytes and in lines; the closing line repeats the digests beside the prompt. The bound is not a promise about one screen: a line longer than the terminal is wide wraps, and a byte shown as `\xNN` takes four columns, so the block can draw up to 32768 characters besides its line prefixes.
+
+**One unit word for the budget.** The v3 budget line and the spend budget line of the scope text state the same integer (the draft checker requires them equal), both in `sat`, the unit word of the seal-spend amounts and of `sign/1`. It is the unit LIP-0013 section 2.1 calls atoms for `spend_budget`.
+
+**What the scope text says about a bound document.** Only what this signer establishes: the document is bound by its SHA-256, the contract binds it by that hash only, it is shown in full, and this signer does not interpret it. When `land` or `spend` is granted beside a document, one more line says that this signer checks no landing and no payment against the document and that the land and spend terms are signed as they stand. The text does not say that the document narrows the terms: no step of this tool compares an instruction with the document, and whether an executor honours it is outside this command.
+
+`TestKeychainDisplayCoversEveryPreimageFieldV2` takes the output bytes of `grant draft-v2` and `grant sign`, and requires the transcript at the first secret read to show the fifteen members in order with their values, exactly the committed fields of the hashed bytes, those bytes verbatim, and their SHA-256 as the digest; it also pins the landlord value statement, the stated bytes and the closing line. `TestKeychainV2ScopeText` fixes the wording for every action set, with and without a bound document. `TestKeychainSignV2Refusals`, `TestKeychainSignV2ScopeDocumentRefusals`, `TestKeychainSignV2WrongStoreKey` and `TestKeychainSignCrossSchema` hold each refusal beside a valid request. `TestKeychainSignV2ScopeDocumentBounds` signs a document at each bound and refuses one byte or one line more. `TestKeychainSignV2StatedValueIsNotTheChainValue` changes the fixture node's landlord value to one with `holders`: a request that states the earlier bytes still signs here, with the unverified statement on the display, and `grant sign` then refuses. The fake terminal of these tests is an unbounded buffer; what a physical terminal keeps in its scrollback is checked only by the dry run on the real machine.
 
 ### `value build --grant-xonly HEX --social-descriptor FILE --json`
 

@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/relux-works/swarma-chain-lab/experiments/rental"
+
+	"github.com/relux-works/swarma-identity/internal/keychain/keychainfake"
 )
 
 // v2Signing is one /2 issuance taken through the CLI up to the point where
@@ -66,6 +68,34 @@ func allFourV2(c *TrustContractV2) {
 func hexValue(value string) *string {
 	s := hex.EncodeToString([]byte(value))
 	return &s
+}
+
+// The display's statement about the landlord value and its closing prompt,
+// written out here and not taken from the implementation. %d is the length
+// of the stated value.
+const (
+	wantUnverifiedValue = "Landlord value     : NOT VERIFIED BY THIS SIGNER. The %d bytes on the next line are the value stated by the request. This signer reads no chain and has not compared them with the current value of the landlord name; that check is the issuing command's (grant sign), which reads the chain."
+	wantPrompt          = "Type SIGN to sign exactly the above, anything else declines: "
+)
+
+// overstatedValueWording is wording that would present the stated landlord
+// value as a fact about the chain or about the landlord.
+var overstatedValueWording = []string{"no holders", "legacy form", "on chain", "its grant key is the signing key"}
+
+// checkValueUnverified requires the exact unverified statement, directly
+// followed by the stated octets and then by the first grant field, and none
+// of the overstated wording anywhere in the display.
+func checkValueUnverified(t *testing.T, shown, value, landlordName string) {
+	t.Helper()
+	want := "\n" + fmt.Sprintf(wantUnverifiedValue, len(value)) + "\n  " + value + "\nLandlord           : " + landlordName + "\n"
+	if strings.Count(shown, want) != 1 {
+		t.Fatalf("display does not state once, before the grant fields, that the landlord value is the request's and unverified:\n%s", shown)
+	}
+	for _, bad := range overstatedValueWording {
+		if strings.Contains(strings.ToLower(shown), bad) {
+			t.Fatalf("display overstates the landlord value: it contains %q", bad)
+		}
+	}
 }
 
 // request asks for landlord_sig and the grant signature under sign/2, with
@@ -180,6 +210,12 @@ func signOneV2(t *testing.T, r KeychainSignRequest) string {
 // the test requested, not the signer's renderer. Cases: the G1.0 shape
 // (instruct and review, depth 0, no text) and all four actions with a
 // repository, a budget, a note with both JSON escapes and a bound scope text.
+// (d) The contract subtest also pins the landlord value section: the exact
+// statement that the value is the request's and is not verified by this
+// signer, then the stated octets, then the first grant field, with none of
+// the overstated wording; and the closing line, which is the last line before
+// the prompt and repeats the contract SHA-256, the document's SHA-256 when
+// one is bound, and the digest to be signed.
 func TestKeychainDisplayCoversEveryPreimageFieldV2(t *testing.T) {
 	text := "Work on the documentation only.\n"
 	for _, tc := range []struct {
@@ -204,6 +240,15 @@ func TestKeychainDisplayCoversEveryPreimageFieldV2(t *testing.T) {
 				}
 				if !strings.Contains(shown, "\nRequest schema     : "+KeychainSignV2Schema+" (draft record "+GrantRecordV2Schema+")\n") {
 					t.Fatal("display does not state the request schema")
+				}
+				checkValueUnverified(t, shown, landlordValue(x.draft.IssuerKey), x.draft.LandlordName)
+				closing := "\nApproval covers    : contract SHA-256 " + x.draft.ContractSHA256
+				if tc.text != nil {
+					closing += "; scope document SHA-256 " + sha256Hex([]byte(*tc.text)) + " (the members and the SCOPE TEXT stand above the document)"
+				}
+				closing += "; contract_sha256 " + sha256Hex(contract) + "\n" + wantPrompt
+				if !strings.HasSuffix(shown, closing) {
+					t.Fatalf("the display does not end with the closing line and the prompt:\n%s", shown)
 				}
 			})
 			t.Run("grant", func(t *testing.T) {
@@ -278,6 +323,12 @@ const (
 	wantScopeParent = "Parent: none; this is a root grant (ordinal 0)."
 )
 
+// The wording about a bound scope document; %s is its SHA-256 (member 11).
+const (
+	wantScopeDocument          = "Scope document: one separate text is bound by its SHA-256 %s. The contract binds it by that hash only; it is shown in full below; this signer does not interpret it."
+	wantScopeDocumentLandSpend = "Scope document beside land or spend: this signer checks no landing and no payment against the document; the land and spend terms above are signed as they stand."
+)
+
 // Claim: the scope text is a pure function of the contract members and has
 // one exact wording. (1) The G1.0 shape and the all-four shape give the two
 // literal texts below. (2) Each of the fifteen action sets gives exactly one
@@ -295,7 +346,7 @@ func TestKeychainV2ScopeText(t *testing.T) {
 			"GRANTED review: the grantee's review verdicts count as reviews for the agent's landing gates, within each repository's reviewer policy.",
 			"NOT GRANTED spend: the grantee may not request any payment.",
 			"Repositories: none.",
-			"Spend budget: 0 atoms; no payment may be requested.",
+			"Spend budget: 0 sat; no payment may be requested.",
 			wantScopeWindow,
 			wantScopeDepth,
 			wantScopeParent,
@@ -322,11 +373,12 @@ func TestKeychainV2ScopeText(t *testing.T) {
 			"Repositories (2), for landing only:",
 			"  - https://git.example/a/b",
 			"  - https://git.example/a/c",
-			"Spend budget: 25000 atoms in total, fees included.",
+			"Spend budget: 25000 sat in total, fees included.",
 			wantScopeWindow,
 			wantScopeDepth,
 			wantScopeParent,
-			"Scope document: one separate text is bound by its SHA-256 " + strings.Repeat("ab", 32) + "; it can only narrow the terms above.",
+			fmt.Sprintf(wantScopeDocument, strings.Repeat("ab", 32)),
+			wantScopeDocumentLandSpend,
 			"Note: 46 bytes, shown as member 15; a note grants nothing and limits nothing.",
 		}
 		if _, code := EncodeTrustContractV2(c); code != "" {
@@ -357,9 +409,9 @@ func TestKeychainV2ScopeText(t *testing.T) {
 		}
 		if slices.Contains(c.Actions, "spend") {
 			c.SpendBudget = 7
-			want = append(want, "Spend budget: 7 atoms in total, fees included.")
+			want = append(want, "Spend budget: 7 sat in total, fees included.")
 		} else {
-			want = append(want, "Spend budget: 0 atoms; no payment may be requested.")
+			want = append(want, "Spend budget: 0 sat; no payment may be requested.")
 		}
 		want = append(append([]string{wantScopeHead}, want...), wantScopeWindow, wantScopeDepth, wantScopeParent, "Scope document: none is bound.", "Note: empty.")
 		t.Run(strings.Join(c.Actions, "+"), func(t *testing.T) {
@@ -372,6 +424,33 @@ func TestKeychainV2ScopeText(t *testing.T) {
 			}
 			if n := strings.Count(strings.Join(got, "\n"), "cannot delegate"); n != 1 {
 				t.Fatalf("depth 0 is stated as \"cannot delegate\" %d times", n)
+			}
+			// One unit word for the budget, and the same word as the grant
+			// field line of the display ("Grant v3 budget    : N sat").
+			if all := strings.Join(got, "\n"); strings.Contains(all, "atoms") || strings.Count(all, " sat") != 1 {
+				t.Fatalf("the budget is not stated once, in sat only: %q", got)
+			}
+			// With a bound document the text says what the signer
+			// establishes about it and never that it narrows the terms. The
+			// extra line stands exactly when land or spend is granted.
+			d := c
+			d.ScopeTextSHA256 = strings.Repeat("cd", 32)
+			if _, code := EncodeTrustContractV2(d); code != "" {
+				t.Fatal("control: the contract with a document hash is not admissible:", code)
+			}
+			wantDoc := slices.Clone(want)
+			at := slices.Index(wantDoc, "Scope document: none is bound.")
+			lines := []string{fmt.Sprintf(wantScopeDocument, strings.Repeat("cd", 32))}
+			if slices.Contains(d.Actions, "land") || slices.Contains(d.Actions, "spend") {
+				lines = append(lines, wantScopeDocumentLandSpend)
+			}
+			wantDoc = slices.Replace(wantDoc, at, at+1, lines...)
+			gotDoc := scopeTextV2(d)
+			if !slices.Equal(gotDoc, wantDoc) {
+				t.Fatalf("scope text with a document:\n got %q\nwant %q", gotDoc, wantDoc)
+			}
+			if strings.Contains(strings.Join(gotDoc, "\n"), "narrow") {
+				t.Fatalf("the scope text claims the document narrows the terms: %q", gotDoc)
 			}
 		})
 	}
@@ -433,7 +512,7 @@ func TestKeychainV2ScopeTextIgnoresRequestText(t *testing.T) {
 		if len(want) != 12 || len(got) != 12 || want[10] != "Scope document: none is bound." {
 			t.Fatalf("control: unexpected scope text %q", want)
 		}
-		want[10] = "Scope document: one separate text is bound by its SHA-256 " + sha256Hex([]byte(doc)) + "; it can only narrow the terms above."
+		want[10] = fmt.Sprintf(wantScopeDocument, sha256Hex([]byte(doc)))
 		if !slices.Equal(got, want) {
 			t.Fatalf("the document changed the scope text:\n got %q\nwant %q", got, want)
 		}
@@ -464,7 +543,9 @@ func TestKeychainV2ScopeTextIgnoresRequestText(t *testing.T) {
 // read. Each negative changes one thing in the valid request, and that
 // unchanged request signs in the same subtest (the valid control). A changed
 // contract is rebound (hash, consent tags, consent id), so the code comes
-// from the rule named and not from a stale hash.
+// from the rule named and not from a stale hash. The landlord value cases
+// judge the value the request states: their codes and their message name the
+// stated value, and are not the codes grant sign gives for the chain value.
 func TestKeychainSignV2Refusals(t *testing.T) {
 	x := prepareV2(t, nil, nil)
 	contract := x.contractBytes(t)
@@ -500,11 +581,19 @@ func TestKeychainSignV2Refusals(t *testing.T) {
 		{"grant-network-and-genesis", "CONTRACT_MISMATCH", 3, func(r *KeychainSignRequest) { r.Draft.Network, r.Draft.Genesis = "main", MainGenesis }},
 		{"grant-network", "NETWORK_PIN", 3, func(r *KeychainSignRequest) { r.Draft.Network = "main" }},
 		{"grant-genesis", "NETWORK_PIN", 3, func(r *KeychainSignRequest) { r.Draft.Genesis = MainGenesis }},
-		// The landlord value: only the legacy form, and only this key's.
-		{"holders-empty", "LANDLORD_NOT_V3", 3, value(`{"swarma":{"landlord":{"grant":"` + key + `","holders":[]}}}`)},
-		{"holders-one-pin", "LANDLORD_NOT_V3", 3, value(`{"swarma":{"landlord":{"grant":"` + key + `","holders":["02` + key + `"]}}}`)},
-		{"value-of-an-agent", "LANDLORD_NOT_V3", 3, value(agentValue(x.contract.LandlordName))},
-		{"value-of-another-key", "LANDLORD_KEY_MISMATCH", 3, value(landlordValue(other))},
+		// The same fifteen members with two adjacent ones in the other order.
+		{"members-swapped", "CONTRACT_ENCODING", 3, swap(`"parent_grant_id":"","ordinal":0`, `"ordinal":0,"parent_grant_id":""`)},
+		// A scope document on a contract that binds none.
+		{"scope-document-unexpected", "SCOPE_TEXT_HASH", 3, func(r *KeychainSignRequest) {
+			b := base64.StdEncoding.EncodeToString([]byte("Work on the documentation only.\n"))
+			r.Draft.ScopeTextB64 = &b
+		}},
+		{"scope-document-unexpected-empty", "SCOPE_TEXT_HASH", 3, func(r *KeychainSignRequest) { b := ""; r.Draft.ScopeTextB64 = &b }},
+		// The stated landlord value: only the legacy form, and only this key's.
+		{"holders-empty", "STATED_LANDLORD_VALUE_NOT_V3", 3, value(`{"swarma":{"landlord":{"grant":"` + key + `","holders":[]}}}`)},
+		{"holders-one-pin", "STATED_LANDLORD_VALUE_NOT_V3", 3, value(`{"swarma":{"landlord":{"grant":"` + key + `","holders":["02` + key + `"]}}}`)},
+		{"value-of-an-agent", "STATED_LANDLORD_VALUE_NOT_V3", 3, value(agentValue(x.contract.LandlordName))},
+		{"value-of-another-key", "STATED_LANDLORD_VALUE_KEY_MISMATCH", 3, value(landlordValue(other))},
 		{"value-absent", "BAD_INPUT", 2, func(r *KeychainSignRequest) { r.LandlordValueHex = nil }},
 		{"value-not-lower-hex", "BAD_INPUT", 2, func(r *KeychainSignRequest) { s := strings.ToUpper(*r.LandlordValueHex); r.LandlordValueHex = &s }},
 		// Digest binding for /2.
@@ -531,7 +620,192 @@ func TestKeychainSignV2Refusals(t *testing.T) {
 			if h.count("show") != 0 || h.count("confirm") != 0 || h.count("secret:") != 0 {
 				t.Fatalf("refused request reached the display or the key: %v", h.log)
 			}
+			if stated := strings.HasPrefix(c.want, "STATED_LANDLORD_VALUE_"); stated != strings.Contains(e.Error.Message, "the stated value") {
+				t.Fatalf("refusal %s has the message %q", c.want, e.Error.Message)
+			}
 		})
+	}
+}
+
+// Claim: under sign/2 a draft whose contract binds a scope document is
+// refused as SCOPE_TEXT_HASH, before anything is shown and before any secret
+// is read, when the document is missing, is another text, is the empty text
+// or is not canonical base64. The unchanged request signs in the same subtest
+// (the valid control). The companion cases, a document on a contract that
+// binds none, are in TestKeychainSignV2Refusals.
+func TestKeychainSignV2ScopeDocumentRefusals(t *testing.T) {
+	text := "Work on the documentation only.\n"
+	x := prepareV2(t, &text, nil)
+	b64 := func(s string) *string {
+		b := base64.StdEncoding.EncodeToString([]byte(s))
+		return &b
+	}
+	raw := func(s string) *string { return &s }
+	for name, doc := range map[string]*string{
+		"missing":          nil,
+		"another-text":     b64("Work on the documentation only."),
+		"empty-text":       b64(""),
+		"not-base64":       raw("!"),
+		"unpadded-base64":  raw(strings.TrimRight(*b64(text), "=")),
+		"trailing-newline": raw(*b64(text) + "\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			control := newKC(t, confirmWord)
+			e, code := control.sign(x.request())
+			mustOK(t, e, code)
+			if control.count("show") != 1 || control.count("secret:") != 2 {
+				t.Fatalf("valid control did not sign: %v", control.log)
+			}
+			h := newKC(t, confirmWord)
+			r := x.request()
+			if doc != nil && *doc == *r.Draft.ScopeTextB64 {
+				t.Fatal("fixture: the document was not changed")
+			}
+			r.Draft.ScopeTextB64 = doc
+			e, code = h.sign(r)
+			mustRefuse(t, e, code, "SCOPE_TEXT_HASH")
+			if code != 3 {
+				t.Fatalf("exit %d, want 3", code)
+			}
+			if h.count("show") != 0 || h.count("confirm") != 0 || h.count("secret:") != 0 {
+				t.Fatalf("refused request reached the display or the key: %v", h.log)
+			}
+		})
+	}
+}
+
+// Claim: the scope document is bounded before the display. A document of
+// exactly 8192 bytes, and one of exactly 256 lines, sign; one byte or one
+// line more is refused as SCOPE_TEXT_SIZE before anything is shown and before
+// any secret is read. Both bounds are written out here. For a document at
+// the bound the transcript keeps the order members, scope text, signature
+// section, document, closing line, prompt; the closing line is the last line
+// before the prompt and repeats the contract SHA-256, the document's SHA-256
+// and the digest to be signed.
+// Limit: the fake terminal is an unbounded buffer, so this proves the order
+// and the bound, not what a physical terminal keeps in its scrollback.
+func TestKeychainSignV2ScopeDocumentBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name, text string
+		signs      bool
+		lines      int // of the document block, when it signs
+	}{
+		{"bytes-at-bound", strings.Repeat("a", 8192), true, 1},
+		{"bytes-above-bound", strings.Repeat("a", 8193), false, 0},
+		{"lines-at-bound", strings.Repeat("a\n", 256), true, 256},
+		{"lines-at-bound-no-final-line-feed", strings.Repeat("a\n", 255) + "a", true, 256},
+		{"lines-above-bound", strings.Repeat("a\n", 257), false, 0},
+		{"lines-above-bound-no-final-line-feed", strings.Repeat("a\n", 256) + "a", false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			x := prepareV2(t, &tc.text, nil)
+			r := x.request()
+			r.ToSign = r.ToSign[:1]
+			if !tc.signs {
+				h := newKC(t, confirmWord)
+				e, code := h.sign(r)
+				mustRefuse(t, e, code, "SCOPE_TEXT_SIZE")
+				if code != 3 {
+					t.Fatalf("exit %d, want 3", code)
+				}
+				if h.count("show") != 0 || h.count("confirm") != 0 || h.count("secret:") != 0 {
+					t.Fatalf("refused request reached the display or the key: %v", h.log)
+				}
+				return
+			}
+			shown := signOneV2(t, r)
+			var at []int
+			for _, mark := range []string{"\nTrust contract     : ", "\nSCOPE TEXT         : ", "\nSignature 1        : ", "\nScope document     : ", "\nApproval covers    : ", wantPrompt} {
+				if strings.Count(shown, mark) != 1 {
+					t.Fatalf("the display does not have exactly one %q", mark)
+				}
+				at = append(at, strings.Index(shown, mark))
+			}
+			if !slices.IsSorted(at) {
+				t.Fatalf("the display sections are out of order: %v", at)
+			}
+			closing := "\nApproval covers    : contract SHA-256 " + x.draft.ContractSHA256 + "; scope document SHA-256 " + sha256Hex([]byte(tc.text)) + " (the members and the SCOPE TEXT stand above the document); contract_sha256 " + x.draft.ContractSHA256 + "\n" + wantPrompt
+			if !strings.HasSuffix(shown, closing) {
+				t.Fatal("the display does not end with the closing line and the prompt")
+			}
+			if got := len(linesUnder(shown, "Scope document     : ", "    | ")); got != tc.lines {
+				t.Fatalf("the document block has %d lines, want %d", got, tc.lines)
+			}
+		})
+	}
+}
+
+// Claim: the landlord value check of keychain sign is a check of the bytes
+// the request states, and the display says so; the on-chain check is grant
+// sign's. With the landlord name's current value changed to one that carries
+// holders: (1) a request stating that value is refused, with the stated-value
+// code; (2) a request stating the earlier legacy bytes signs, because this
+// signer reads no chain, and its display states that the value is the
+// request's and unverified, without the overstated wording and without the
+// current value; (3) grant sign, which reads the chain, then refuses both the
+// grant_hash stage and the completion with LANDLORD_NOT_V3. Control: the same
+// grant sign request is accepted before the value changes.
+// Limit: the chain is the loopback fixture node.
+func TestKeychainSignV2StatedValueIsNotTheChainValue(t *testing.T) {
+	x := prepareV2(t, nil, nil)
+	key := x.draft.IssuerKey
+	stage := GrantSignRequest{Schema: GrantSignSchema, Draft: x.draft, ConsentEvent: x.consent, LandlordSig: x.landlordSig}
+	e, code := x.f.signCmd(stage)
+	mustOK(t, e, code)
+
+	current := `{"swarma":{"landlord":{"grant":"` + key + `","holders":[]}}}`
+	x.f.node.set(x.contract.LandlordName, current)
+
+	h := newKC(t, confirmWord)
+	r := x.request()
+	r.LandlordValueHex = hexValue(current)
+	e, code = h.sign(r)
+	mustRefuse(t, e, code, "STATED_LANDLORD_VALUE_NOT_V3")
+	if h.count("show") != 0 || h.count("secret:") != 0 {
+		t.Fatalf("refused request reached the display or the key: %v", h.log)
+	}
+
+	h = newKC(t, confirmWord)
+	e, code = h.sign(x.request())
+	mustOK(t, e, code)
+	res := resultAs[KeychainSignResult](t, e)
+	if len(res.Signatures) != 2 || h.count("show") != 1 || h.count("secret:") != 2 {
+		t.Fatalf("the request stating the earlier value did not sign: %v", h.log)
+	}
+	shown := h.term.shown.String()
+	checkValueUnverified(t, shown, landlordValue(key), x.draft.LandlordName)
+	if strings.Contains(shown, "holders") {
+		t.Fatal("the display mentions holders, which this signer never read")
+	}
+
+	e, code = x.f.signCmd(stage)
+	mustRefuse(t, e, code, "LANDLORD_NOT_V3")
+	stage.GrantSig = res.Signatures[1].Signature
+	e, code = x.f.signCmd(stage)
+	mustRefuse(t, e, code, "LANDLORD_NOT_V3")
+}
+
+// Claim: under sign/2 the label's stored key decides. With another key
+// stored under the label, the request that signs under the landlord's key is
+// refused as KEY_MISMATCH after the public read, before anything is shown and
+// before any secret is read. Control: the same request signs with the
+// landlord's key in the store.
+func TestKeychainSignV2WrongStoreKey(t *testing.T) {
+	x := prepareV2(t, nil, nil)
+	control := newKC(t, confirmWord)
+	e, code := control.sign(x.request())
+	mustOK(t, e, code)
+	if control.count("show") != 1 || control.count("secret:") != 2 {
+		t.Fatalf("valid control did not sign: %v", control.log)
+	}
+	h := newKCWithStore(t, confirmWord, keychainfake.New(), bip340Secrets[keyOther])
+	e, code = h.sign(x.request())
+	mustRefuse(t, e, code, "KEY_MISMATCH")
+	if code != 3 {
+		t.Fatalf("exit %d, want 3", code)
+	}
+	if len(h.log) == 0 || h.log[0] != "public:"+kcLabel || h.count("show") != 0 || h.count("confirm") != 0 || h.count("secret:") != 0 {
+		t.Fatalf("a request for another key reached the display or the key: %v", h.log)
 	}
 }
 
@@ -626,7 +900,8 @@ func TestKeychainSignCrossSchema(t *testing.T) {
 // carries the /2 profile string and the single depth-zero right on a root;
 // it then returns the fifteen members read from the bytes. Each negative
 // stands beside the valid pair. The members reader refuses any object that
-// is not exactly the fifteen members in order.
+// is not exactly the fifteen members in order: one missing, one extra, one
+// repeated, or two adjacent members swapped.
 func TestKeychainV2DisplayGate(t *testing.T) {
 	c := baseV2Contract(t)
 	raw := rawV2(t, c)
@@ -645,6 +920,15 @@ func TestKeychainV2DisplayGate(t *testing.T) {
 		edit(&d)
 		return d, rawV2(t, d)
 	}
+	// The same fifteen members with two adjacent ones in the other order: the
+	// display claims the order of LIP-0014 section 3, so neither the gate nor
+	// the members reader may admit it.
+	swapped := replaceOnce(t, raw, `"parent_grant_id":"","ordinal":0`, `"ordinal":0,"parent_grant_id":""`)
+	t.Run("members-swapped", func(t *testing.T) {
+		if _, code := admitV2Display(swapped, c); code != "CONTRACT_ENCODING" {
+			t.Fatalf("two members swapped: %q", code)
+		}
+	})
 	t.Run("non-canonical-bytes", func(t *testing.T) {
 		for _, bad := range [][]byte{replaceOnce(t, raw, `{"profile":`, `{ "profile":`), append(slices.Clone(raw), '\n'), replaceOnce(t, raw, `"network":"main"`, `"network":"mai\u006e"`)} {
 			if _, code := admitV2Display(bad, c); code != "CONTRACT_ENCODING" {
@@ -689,6 +973,8 @@ func TestKeychainV2DisplayGate(t *testing.T) {
 			replaceOnce(t, raw, `,"note":""`, ``),
 			replaceOnce(t, raw, `"note":""`, `"note":"","extra":0`),
 			replaceOnce(t, raw, `"ordinal":0,`, ``),
+			swapped,
+			replaceOnce(t, raw, `"note":""`, `"note":"","note":""`),
 			replaceOnce(t, raw, `{"profile":`, `{ "profile":`),
 			append(slices.Clone(raw), '{', '}'),
 			[]byte(`[]`), nil,
