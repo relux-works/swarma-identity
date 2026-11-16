@@ -182,6 +182,8 @@ is still required for actual Touch ID/passcode and enrollment semantics.
 }
 ```
 
+This is the request for a `/1` draft. A `/2` draft from `grant draft-v2` needs `swarma-keychain/sign/2`, described [below](#swarma-keychainsign2-the-depth-zero-swarma-trust-contract2-draft); the two do not mix.
+
 - `to_sign` entries are copied from PR 8's output: `grant draft` and `grant consent` give `contract_sha256`, and `grant sign` stage `grant_hash` gives `grant_signing_hash`. Only `signer:"landlord"` entries are accepted, and their key must be this item's key. The draft's `issuer_key` must also be this key, otherwise the request is refused with `KEY_MISMATCH`.
 - `seal_spend` is optional and takes exactly one of two forms:
   - `tx_hex` with one prevout per input. A legacy sighash does not commit to amounts, so the display marks those amounts as supplied by the request. A prevout may carry `prev_tx_hex`, the full previous transaction; it must hash to the input's txid, and its output must have exactly the supplied script and amount (`SEAL_SPEND_PREVOUTS` otherwise). The display then marks that amount as read from the previous transaction.
@@ -225,6 +227,58 @@ Refusal codes:
 | `UNKNOWN_ACCESS_POLICY`, `ACCESS_POLICY_MISMATCH` | Unknown policy, or displayed policy disagrees with authenticated policy metadata (or actual ACL where independently inspectable); no signature is returned. |
 | `KEYCHAIN_ENTITLEMENT` | See [Developer ID signing](#developer-id-signing-for-the-data-protection-keychain). |
 | `SIGNATURE_VERIFY` | A produced signature did not verify. |
+
+#### `swarma-keychain/sign/2`: the depth-zero `swarma-trust-contract/2` draft
+
+`grant draft-v2` emits a `swarma-trust/draft-record/2` record ([GRANT.md](GRANT.md#depth-zero-profile-2)). `keychain sign` takes it only under its own request schema:
+
+```json
+{
+  "schema": "swarma-keychain/sign/2",
+  "draft": { "...": "the draft record from grant draft-v2 (swarma-trust/draft-record/2), with scope_text_b64 when the contract binds a text" },
+  "landlord_value_hex": "<the landlord name's current value, lowercase hex, as identity show or value build prints it>",
+  "to_sign": [ {"signer":"landlord","key":"<x-only>","purpose":"contract_sha256","digest":"…"} ],
+  "consent_event": { "...": "required for grant_signing_hash" },
+  "landlord_sig": "required for grant_signing_hash",
+  "seal_spend": { "...": "optional, as under sign/1" }
+}
+```
+
+**Why a second schema and no discriminator inside `sign/1`.** The request schema alone selects the path, and it must agree with the draft record: `sign/1` takes only `draft-record/1`, `sign/2` takes only `draft-record/2`, and every other pairing, an unknown schema included, is `BAD_INPUT`. Nothing is inferred from the contract's members. `sign/2` has a required member that `sign/1` does not have (`landlord_value_hex`) and a different display, so one schema string now names one request shape and one display. A `sign/1` request is read and shown exactly as before; `landlord_value_hex` under `sign/1` is `BAD_INPUT`, as every unknown member was.
+
+**Checks before the display.** All of these run before anything is shown and before any secret is read:
+
+| Condition | Code |
+| --- | --- |
+| The schema and the draft record do not pair, the schema is unknown, `landlord_value_hex` is absent or not lowercase hex, or the request carries any member outside the closed shape (a scope string, for instance) | `BAD_INPUT` |
+| The draft's genesis is not the pinned genesis of its network | `NETWORK_PIN` |
+| The contract's network, names, grantee key or window differ from the grant fields of the draft | `CONTRACT_MISMATCH` |
+| The contract bytes are not canonical: the reader rebuilds them token by token and compares, and the signer re-encodes the typed contract and compares again | `CONTRACT_ENCODING` |
+| An unknown or a duplicate top-level member | `CONTRACT_FIELD` |
+| Fifteen members with a profile string other than `swarma-trust-contract/2` | `CONTRACT_PROFILE` |
+| `delegate.depth` above 0, any non-empty part of the right, or a parent (`parent_grant_id`, `ordinal`) | `CONTRACT_DEPTH` |
+| The separate scope text is missing, unexpected or does not hash to member 11 | `SCOPE_TEXT_HASH` |
+| The landlord value is not the legacy v3 landlord value. This includes a value whose landlord binding carries `holders` (LIP-0010 section 10): a reader that does not know that member refuses the value and with it every v3 grant of the landlord, so no v3 grant is signed under it | `LANDLORD_NOT_V3` |
+| The landlord value's grant key is not the draft's `issuer_key` | `LANDLORD_KEY_MISMATCH` |
+| A requested digest is not the SHA-256 of the bytes that will be shown, or the entry is not this key's | `DIGEST_BINDING`, `KEY_MISMATCH` |
+
+The other draft and consent codes of [GRANT.md](GRANT.md) apply unchanged (`CONTRACT_HASH`, `SCOPE_MISMATCH`, `BUDGET_MISMATCH`, `CONSENT_*`, `GRANT_FIELD`, `LANDLORD_SIGNATURE`).
+
+The landlord value is what the request states. This command reads no chain; `grant sign` compares the landlord's on-chain value and key. The display says so on the value's own line.
+
+**Digest binding.** As under `sign/1`: `contract_sha256` is recomputed as the SHA-256 of the exact `/2` contract bytes, and `grant_signing_hash` as the SHA-256 of `swarma-grant-v3` followed by the canonical grant, built from the draft, the verified consent event and the verified `landlord_sig`. Both byte strings are then shown as committed fields and verbatim.
+
+**The display.** Before the confirmation prompt the terminal shows, in this order:
+
+- the request schema and the draft record schema; the label, access policy, key and P2PKH address; the network and genesis
+- the landlord value in full, with the statement that the request supplied it
+- the grant fields: landlord, agent, grantee key and name, the derived v3 scope and budget, the window, the contract SHA-256 and the seal outpoint
+- **all fifteen members** of the contract in the order of LIP-0014 section 3, numbered, each with the exact octets of its value as they stand in the signed bytes (`delegate` as its whole object). No value is shortened
+- the **scope text**: plain language that this signer words from the typed members alone. It states the parties and the network; for each of `instruct`, `land`, `review` and `spend`, in that order, one `GRANTED` or `NOT GRANTED` line with the meaning of LIP-0013 section 2.2; the repositories; the spend budget in atoms; the window; `Delegation: depth 0; the grantee cannot delegate: no child grant may be issued under this grant.`; that the grant is a root; whether a scope document is bound, by its hash; and the length of the note. No draft field, request member, note text or document text enters this wording
+- the separate scope document, when the draft carries one: its length and SHA-256, then its exact octets in a block of its own, one line per line of the text, each prefixed `    | `. A byte outside printable ASCII, the line feed and the backslash included, is shown as `\xNN`, so the document cannot draw a line that looks like another part of the display
+- each signature and the seal spend, exactly as under `sign/1`
+
+`TestKeychainDisplayCoversEveryPreimageFieldV2` takes the output bytes of `grant draft-v2` and `grant sign`, and requires the transcript at the first secret read to show the fifteen members in order with their values, exactly the committed fields of the hashed bytes, those bytes verbatim, and their SHA-256 as the digest. `TestKeychainV2ScopeText` fixes the wording for every action set. `TestKeychainSignV2Refusals` and `TestKeychainSignCrossSchema` hold each refusal beside a valid request.
 
 ### `value build --grant-xonly HEX --social-descriptor FILE --json`
 

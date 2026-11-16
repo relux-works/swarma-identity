@@ -165,13 +165,19 @@ func KeychainKeygen(deps keychainDeps, label, network string, access keypolicy.P
 // grant commands pass along, the digests they asked the landlord to sign, the
 // grant-hash inputs when the grant digest is requested, and an optional seal
 // spend. Every digest is re-derived from the draft before anything is shown.
+//
+// Schema selects the path and is never inferred from the content:
+// KeychainSignSchema takes only the /1 draft record and no landlord value;
+// KeychainSignV2Schema (keychain_sign_v2.go) takes only the /2 draft record
+// and requires landlord_value_hex. Any other pairing is BAD_INPUT.
 type KeychainSignRequest struct {
-	Schema       string          `json:"schema"`
-	Draft        GrantDraft      `json:"draft"`
-	ToSign       []SigningDigest `json:"to_sign"`
-	ConsentEvent *rental.Event   `json:"consent_event,omitempty"`
-	LandlordSig  string          `json:"landlord_sig,omitempty"`
-	SealSpend    *SealSpend      `json:"seal_spend,omitempty"`
+	Schema           string          `json:"schema"`
+	Draft            GrantDraft      `json:"draft"`
+	ToSign           []SigningDigest `json:"to_sign"`
+	ConsentEvent     *rental.Event   `json:"consent_event,omitempty"`
+	LandlordSig      string          `json:"landlord_sig,omitempty"`
+	SealSpend        *SealSpend      `json:"seal_spend,omitempty"`
+	LandlordValueHex *string         `json:"landlord_value_hex,omitempty"` // sign/2 only
 }
 
 type KeychainSignature struct {
@@ -479,10 +485,23 @@ func renderSealSpend(w func(string, ...any), spend *sealSpendPlan) {
 }
 
 func (deps keychainDeps) sign(label string, r KeychainSignRequest) (*KeychainSignResult, string, *Failure) {
-	if r.Schema != KeychainSignSchema || !validLabel(label) {
+	isV2 := r.Schema == KeychainSignV2Schema
+	// sign/1 never had the landlord value member: its presence there stays
+	// the BAD_INPUT that the closed request decoder gave before sign/2.
+	if (r.Schema != KeychainSignSchema && !isV2) || (!isV2 && r.LandlordValueHex != nil) || !validLabel(label) {
 		return nil, "", fail("BAD_INPUT")
 	}
-	raw, tc, f := checkDraft(r.Draft)
+	var (
+		raw []byte
+		tc  TrustContract
+		v2  *signV2
+		f   *Failure
+	)
+	if isV2 {
+		raw, v2, f = checkSignV2(r)
+	} else {
+		raw, tc, f = checkDraft(r.Draft)
+	}
 	network := selectedNetwork(pinnedNetwork(r.Draft.Network))
 	if f != nil {
 		return nil, network, f
@@ -520,7 +539,13 @@ func (deps keychainDeps) sign(label string, r KeychainSignRequest) (*KeychainSig
 	if err != nil {
 		return nil, network, keychainRefuse("NO_TERMINAL")
 	}
-	if err := term.Show(renderSignRequest(r, tc, key, items, spend, inspectable)); err != nil {
+	var shown string
+	if isV2 {
+		shown = renderSignRequestV2(r, v2, key, items, spend, inspectable)
+	} else {
+		shown = renderSignRequest(r, tc, key, items, spend, inspectable)
+	}
+	if err := term.Show(shown); err != nil {
 		return nil, network, keychainRefuse("NO_TERMINAL")
 	}
 	ok, err := term.Confirm("Type " + confirmWord + " to sign exactly the above, anything else declines: ")

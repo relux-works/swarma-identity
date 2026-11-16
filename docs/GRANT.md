@@ -633,11 +633,17 @@ The grantee signs the same kind-8181 event shape. The landlord signs the raw
 `swarma-grant-v3` prefix (LIP-0004 sections 2–3). The issuance commitment
 retains `swarma-issue-v1` (LIP-0004 section 4). No `/2` signing prefix exists.
 
-The Mac `swarma-keychain keychain sign` input/display remains `/1` only;
-passing a `/2` draft to that adapter refuses as `BAD_INPUT`. Supply public
-signatures through an external signer that can render all fifteen members
-and the exact separate scope text, recomputing the digests itself. No signer
-adapter or new key handling is added here.
+The Mac `swarma-keychain keychain sign` takes this draft under the request
+schema `swarma-keychain/sign/2`, which also requires the landlord's current
+value (`landlord_value_hex`). It recomputes both landlord digests from the
+bytes it shows, shows all fifteen members in order with a scope text worded
+from them alone and the exact separate scope text, and refuses before the
+display a contract that is not a canonical depth-zero root and a landlord
+value that is not the legacy one, `holders` included
+([KEYCHAIN.md](KEYCHAIN.md)). Passing a `/2` draft under
+`swarma-keychain/sign/1` still refuses as `BAD_INPUT`. Any other external
+signer must likewise render all fifteen members and the exact separate scope
+text and recompute the digests itself. Key custody is unchanged.
 
 ### `grant contract-verify --request FILE --json`
 
