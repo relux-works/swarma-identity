@@ -19,6 +19,11 @@ consent/countersign flow. Scope text travels as separate exact bytes.
 Only the empty depth-zero right is admitted; child certification and notaries
 remain outside this slice. See [the /2 contract](docs/GRANT.md#depth-zero-profile-2).
 
+Grant v4 has separate, partial offline octet tooling: root/child drafting,
+external signature assembly, review, root contract assents, and root/by-key
+preparation/anchor frames. It is **not a live issuer** and has no private-key
+grant-signing route. See [the v4 scope and explicit blockers](docs/GRANT_V4.md).
+
 Node deployment/lifecycle, name transactions, transaction signing/broadcast, live grant verification, Nostr publication and NIP-05 resolution remain planned. Wallet-visible balance is not implemented. No plugin registration interface is exposed by this version.
 
 The CLI uses no private keys or signer. The grant commands only exchange digests and public BIP-340 signatures with each party's own external signer; the test-only signer in `internal/testsigner` is not linked into the binary and loads only published BIP-340 test keys. Public derivation and both Nostr operations work without a node, wallet or relay. Online commands read only the selected node and never import a wallet, sign, broadcast, restart a service or automatically retry a scan. Validating a Nostr signature establishes no publication, freshness or identity authority.
