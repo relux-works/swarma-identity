@@ -40,6 +40,13 @@ rules. A signature failure in a child is `CHILD_SIGNER`; a bad parent
 reference is `WIRE_ID` before any signature check. Bounds apply to the
 complete signed form, including when only the payload is being drafted.
 An identifier excludes the signature; a content address includes it.
+`Read` requires a signed, verified parent for child verification; an unsigned
+`Draft` parent is not an authenticated delegation source (`WIRE_ID`). Drafting
+may still use an unsigned parent. `Preparation` reads supplied parent bytes
+first, so a parent refusal can precede the grant's refusal. `Draft` validates
+its eventual signed envelope: spliced payload suffixes all refuse, but their
+codes depend on the resulting envelope defect (syntax, membership, duplicate
+or canonical form), not a separate payload-only refusal order.
 
 ## Public file exchange
 
@@ -56,7 +63,9 @@ Grant requests have `schema: "swarma-identity/grant-v4/1"`:
   root), optional `calendar`. Returns canonical payload bytes, payload
   identifier, typed digest, signing public key, seal script and
   `admission_checked: false`. A child requires its checked parent.
-- `grant consent-v4`: the draft inputs and `created_at` (Unix seconds).
+- `grant consent-v4`: the draft inputs and required `created_at` (Unix seconds
+  from 1 through 253402300799, inclusive). There is no default: an absent or
+  null field refuses as `BAD_INPUT`; an out-of-range value as `CONSENT_SHAPE`.
   Returns an unsigned NIP-01 event template and the root issuer's typed
   assent payload/digest. Only root/by-key templates are supported. A
   consent time is never compared with a height.
@@ -66,7 +75,8 @@ Grant requests have `schema: "swarma-identity/grant-v4/1"`:
   values. The external signer must independently enforce the issuer's
   duties; this command does not establish that it did so.
 - `grant anchor-v4`: `signed_hex`, `assent_hex`, `consent_hex`, explicit
-  verifier clock `now`, optional `parent_hex`, `name_output`, `frame_hex`.
+  verifier clock `now` (required, never defaulted), optional `parent_hex`,
+  `name_output`, `frame_hex`.
   Returns the preparation, its typed commitment, and the 72-byte anchor
   script with `dry_run: true, admission_checked: false`. It checks the
   grant, mode, assent and consent in W9.4 order, then a supplied candidate
@@ -91,7 +101,11 @@ optional `parent_hex`, and `landlord_value_hex`; commands also require
   key or the checked parent's delegation key, **before display**. It shows
   every preimage leaf (empty lists included), exact reconstructible payload
   bytes, typed-hash construction, the stated landlord value as unverified,
-  and member-derived scope text last. It requests no confirmation or key
+  and member-derived scope text last. The network name and genesis are shown.
+  When native ACL inspection is unavailable, it uses the same caveat as the
+  sibling signers: authenticated policy metadata is checked before signing.
+  Child review explicitly states that parent terms are not displayed and row
+  fit is not checked. It requests no confirmation or key
   authentication and creates no signature.
 - `keychain sign-v4` accepts a root only. It additionally shows every member
   and byte of the root contract assent, explicitly says that only that
@@ -139,8 +153,28 @@ curve/hash libraries implement the reader; the Python checker is never
 invoked by production code. Tests pin the whole corpus and fixed identities
 outside it, assert all 112 outcomes (11 valid, 84 invalid, 13 compound,
 4 proposal-only), all 19 refusal counts, all derived hashes/scripts, and
-exact re-drafting of every valid vector. Replacing the corpus with one
+exact re-drafting of every valid vector, including each control's own parent
+and reference context. Payload/signed text (where present), signature, signed
+hex, byte count and proposal outcomes are asserted explicitly. Corpus metadata (`rules`,
+`codes_exercised`, `not_exercised`, `no_neighbour`, claims and rule lists) is
+covered by the whole-file hash, not independently interpreted. Replacing the corpus with one
 regenerated under another key fails its independent literal pin.
+
+`testdata/wire-vectors.json` is the unchanged pinned wire corpus (SHA-256
+`0d14f471e4a0a39c99455fab663bdce5c05f2c97fe2383ecbe95717721d53ae0`).
+`TestWireVectors` runs 207 entries: canonical (53), integers (19), primitives
+(11), assents (42), identifiers (4), consent events (35), and issuance (43).
+It compares the preparation, commitment and frame with `issuance-v-01` and
+`issuance-v-03`, and assent bytes/digests and event ids with their literal
+vector oracles. The historical memberless grant is used only as stated
+arithmetic inputs, never accepted through `Read`. By-name consent and issuance
+cases that reach the evidence stage expect `UNSUPPORTED_CAPABILITY`, not
+simulated node evidence. Earlier mode/binding refusals still retain their
+specified codes. Stored preparation vectors check octets and schema only;
+those bytes do not claim that the parts were verified. The twelve
+`issuer_checks` entries are outside this offline verifier and are not run.
+Set `GRANTV4_WIRE_OUTPUT` to export the 207 actual verdicts for a differential
+against the pin. No specification checker code is included in this module.
 
 The facade tests use the existing fake keychain, not the native store, and
 assert display field counts of 30, 31, 81, 45, 22, 30, 21, 1511, 30, 80 and
@@ -158,3 +192,17 @@ production child-signing claim. Run the pinned specification's
 `python3 -I tools/grantv4/grantv4.py check <file>` on checker-format exports.
 Tests make no external network requests. Native keychain coverage still
 requires macOS; hosted CI cannot be inferred from a local Linux run.
+
+### Native qualification inventory (not run on Linux)
+
+- `TestKeychainDarwinEndToEnd`: native Security framework, real terminal,
+  authentication prompts, key creation and signing on macOS.
+- Native ACL inspectability limits and authenticated policy metadata checks,
+  including changed metadata between display and authentication.
+- Touch ID current-set/any and passcode fallback, cancellations and device-only
+  storage properties on real hardware.
+- Darwin application signing, entitlements and release qualification.
+
+The Linux fake-store tests prove display text, prompt text, policy refusals
+and ordering, not those native properties. Hosted validation is separate and
+is not run by these offline commands.

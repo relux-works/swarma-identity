@@ -16,23 +16,23 @@ func documentOutcome(raw []byte) (err error) {
 // TestDocumentEdges proves syntax/depth byte precedence and distinct decoded surrogate names cannot invent a duplicate refusal, beside valid controls.
 func TestDocumentEdges(t *testing.T) {
 	nested := func(n int) string { return `{"a":` + strings.Repeat("[", n) + `0` + strings.Repeat("]", n) + `}` }
-	cases := []struct{ bad, code string }{
-		{`{"\ud800":1,"�":2}`, "WIRE_STRING"},
-		{`{"\ud800":1,"\ud801":2}`, "WIRE_STRING"},
-		{`{"\ud800":1,"\ud800":2}`, "WIRE_DUPLICATE"},
-		{`{"a":1,"\u0061":2}`, "WIRE_DUPLICATE"},
-		{`{"a":"\u+001"}`, "WIRE_JSON"},
-		{`{"a":"\ud800\u0001"}`, "WIRE_STRING"},
-		{`{"a":"\ud800\uXXXX"}`, "WIRE_JSON"},
-		{`{"a":"` + string([]byte{0xff}) + `"}`, "WIRE_JSON"},
-		{nested(16), "WIRE_SIZE"},
-		{strings.TrimSuffix(nested(16), "}"), "WIRE_SIZE"},
-		{`{"a":?` + strings.Repeat("[", 17), "WIRE_JSON"},
-		{strings.Repeat(" ", MaxBytes+1), "WIRE_SIZE"},
+	cases := []struct{ good, bad, code string }{
+		{`{"a":1,"�":2}`, `{"\ud800":1,"�":2}`, "WIRE_STRING"},
+		{`{"a":1,"b":2}`, `{"\ud800":1,"\ud801":2}`, "WIRE_STRING"},
+		{`{"a":1,"b":2}`, `{"\ud800":1,"\ud800":2}`, "WIRE_DUPLICATE"},
+		{`{"a":1}`, `{"a":1,"\u0061":2}`, "WIRE_DUPLICATE"},
+		{`{"a":"a"}`, `{"a":"\u+001"}`, "WIRE_JSON"},
+		{`{"a":1,"b":2}`, `{"\ud800\u0061":1,"\ud800a":2}`, "WIRE_DUPLICATE"},
+		{`{"a":"a"}`, `{"a":"\ud800\uXXXX"}`, "WIRE_JSON"},
+		{`{"a":"a"}`, `{"a":"` + string([]byte{0xff}) + `"}`, "WIRE_JSON"},
+		{nested(15), nested(16), "WIRE_SIZE"},
+		{nested(15), strings.TrimSuffix(nested(16), "}"), "WIRE_SIZE"},
+		{nested(15), `{"a":?` + strings.Repeat("[", 17), "WIRE_JSON"},
+		{`{}`, strings.Repeat(" ", MaxBytes+1), "WIRE_SIZE"},
 	}
 	for _, c := range cases {
-		if e := documentOutcome([]byte(nested(15))); e != nil {
-			t.Fatalf("valid depth control: %v", e)
+		if e := documentOutcome([]byte(c.good)); e != nil {
+			t.Fatalf("valid document control: %v", e)
 		}
 		if e := documentOutcome([]byte(c.bad)); e == nil || e.Error() != c.code {
 			t.Fatalf("want %s; got %v", c.code, e)

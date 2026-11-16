@@ -69,6 +69,7 @@ func place(g object, parent *Grant) string {
 }
 
 // Read applies all nine steps, including signature and reference precedence.
+// A child's parent must be a signed result of Read, not an unsigned Draft.
 // Proposal-only script and stop-placement restrictions are deliberately not
 // judged; the four undetermined vectors read as well-formed documents.
 func Read(raw []byte, parent *Grant, reference *string) (g *Grant, err error) {
@@ -94,6 +95,9 @@ func Read(raw []byte, parent *Grant, reference *string) (g *Grant, err error) {
 		reject("WIRE_SIGNATURE_FORM")
 	}
 	g = &Grant{payload: p, raw: encode(p), signed: bytes.Clone(raw), signature: sig}
+	if g.Child() && parent != nil && len(parent.signed) == 0 {
+		reject("WIRE_ID")
+	}
 	g.signer = place(p, parent)
 	code := "WIRE_SIGNATURE"
 	if g.Child() {
@@ -112,6 +116,8 @@ func Read(raw []byte, parent *Grant, reference *string) (g *Grant, err error) {
 // Draft accepts canonical payload members, reserves the full signed
 // envelope overhead, and applies every non-signature rule before returning
 // anything. It never repairs noncanonical input or accepts a supplied digest.
+// Payloads spliced into more envelope members always refuse; the exact code
+// depends on the resulting envelope defect, not a payload-only pipeline.
 func Draft(payload []byte, parent *Grant) (g *Grant, err error) {
 	defer func() {
 		if err != nil {
@@ -135,6 +141,9 @@ func Draft(payload []byte, parent *Grant) (g *Grant, err error) {
 
 // Attach verifies a device signature against exactly the drafted bytes.
 func Attach(g *Grant, signature string, parent *Grant) (*Grant, error) {
+	if !isHex(signature, 128) {
+		return nil, Refusal("WIRE_SIGNATURE_FORM")
+	}
 	raw := append([]byte(`{"payload":`), g.raw...)
 	q, _ := json.Marshal(signature)
 	raw = append(raw, []byte(`,"signature":`)...)

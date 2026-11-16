@@ -21,13 +21,14 @@ func AssentPayload(g *Grant) ([]byte, string, error) {
 	raw := encode(p)
 	return raw, typed(AssentType, raw), nil
 }
-func checkAssent(raw []byte, g *Grant) (party, signature string, err error) {
+func readAssent(raw []byte, reference *string) (p object, signature string, err error) {
 	defer guard(&err)
 	doc := parseDocument(raw, 1024).(object)
 	if len(doc) != 2 || doc["payload"] == nil || doc["signature"] == nil {
 		reject("WIRE_MEMBER")
 	}
-	p, ok := doc["payload"].(object)
+	var ok bool
+	p, ok = doc["payload"].(object)
 	if !ok || str(p, "type") != AssentType {
 		reject("WIRE_TYPE")
 	}
@@ -36,17 +37,27 @@ func checkAssent(raw []byte, g *Grant) (party, signature string, err error) {
 	if !ok || !isHex(signature, 128) {
 		reject("WIRE_SIGNATURE_FORM")
 	}
-	party = str(p, "party")
-	if !Verify(party, typed(AssentType, encode(p)), signature) {
+	if !Verify(str(p, "party"), typed(AssentType, encode(p)), signature) {
 		reject("WIRE_SIGNATURE")
 	}
+	if reference != nil && *reference != hash(encode(p)) {
+		reject("WIRE_ID")
+	}
+	return p, signature, nil
+}
+
+func checkAssent(raw []byte, g *Grant) (party, signature string, err error) {
+	p, signature, err := readAssent(raw, nil)
+	if err != nil {
+		return "", "", err
+	}
 	if str(p, "genesis") != g.Genesis() || str(p, "contract") != g.Contract() {
-		reject("ASSENT_BINDING")
+		return "", "", Refusal("ASSENT_BINDING")
 	}
-	if party != g.Signer() {
-		reject("ASSENT_PARTY")
+	if str(p, "party") != g.Signer() {
+		return "", "", Refusal("ASSENT_PARTY")
 	}
-	return party, signature, nil
+	return str(p, "party"), signature, nil
 }
 
 type Event struct {
@@ -59,9 +70,20 @@ type Event struct {
 	Sig       string     `json:"sig"`
 }
 
+// eventJSON preserves the fixed member order and literal printable ASCII of
+// LIP-0013. Unlike the v4 payload encoder, this also accepts NIP-01 arrays.
+func eventJSON(v any) []byte {
+	var b bytes.Buffer
+	e := json.NewEncoder(&b)
+	e.SetEscapeHTML(false)
+	if err := e.Encode(v); err != nil {
+		panic("event encoding")
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte{'\n'})
+}
+
 func eventID(e Event) string {
-	b, _ := json.Marshal([]any{0, e.Pubkey, e.CreatedAt, e.Kind, e.Tags, e.Content})
-	return hash(b)
+	return hash(eventJSON([]any{0, e.Pubkey, e.CreatedAt, e.Kind, e.Tags, e.Content}))
 }
 
 // ConsentTemplate binds a by-key root to its chain, contract and issuer. A
@@ -70,7 +92,7 @@ func ConsentTemplate(g *Grant, createdAt int64) (Event, error) {
 	if g.Child() || obj(g.payload, "recipient")["key"] == nil {
 		return Event{}, Refusal("UNSUPPORTED_CAPABILITY")
 	}
-	if createdAt < 0 || uint64(createdAt) > MaxNumber {
+	if createdAt < 1 || createdAt > 253402300799 {
 		return Event{}, Refusal("CONSENT_SHAPE")
 	}
 	e := Event{Pubkey: str(obj(g.payload, "recipient"), "key"), CreatedAt: createdAt, Kind: 8181, Tags: [][]string{{"t", "swarma-contract-consent/1"}, {"genesis", g.Genesis()}, {"contract", g.Contract()}, {"issuer", g.Signer()}}, Content: ""}
@@ -93,11 +115,11 @@ func checkConsent(raw []byte, g *Grant, now int64) (e Event, err error) {
 			bad()
 		}
 	}
-	again, _ := json.Marshal(e)
+	again := eventJSON(e)
 	if !bytes.Equal(again, raw) {
 		bad()
 	}
-	if !isHex(e.ID, 64) || !isHex(e.Sig, 128) || !isHex(e.Pubkey, 64) || e.CreatedAt < 0 || uint64(e.CreatedAt) > MaxNumber || e.Kind != 8181 || e.Content != "" || (len(e.Tags) != 4 && len(e.Tags) != 5) {
+	if !isHex(e.ID, 64) || !isHex(e.Sig, 128) || !isHex(e.Pubkey, 64) || e.CreatedAt < 1 || e.CreatedAt > 253402300799 || e.Kind != 8181 || e.Content != "" || (len(e.Tags) != 4 && len(e.Tags) != 5) {
 		bad()
 	}
 	for i, name := range []string{"t", "genesis", "contract", "issuer", "name"} {
@@ -106,6 +128,13 @@ func checkConsent(raw []byte, g *Grant, now int64) (e Event, err error) {
 		}
 		if len(e.Tags[i]) != 2 || e.Tags[i][0] != name {
 			bad()
+		}
+		for _, value := range e.Tags[i] {
+			for _, c := range value {
+				if c < 0x20 || c > 0x7e {
+					bad()
+				}
+			}
 		}
 	}
 	if e.Tags[0][1] != "swarma-contract-consent/1" || !isHex(e.Tags[1][1], 64) || !isHex(e.Tags[2][1], 64) || !isHex(e.Tags[3][1], 64) || e.ID != eventID(e) {
@@ -149,6 +178,7 @@ func checkConsent(raw []byte, g *Grant, now int64) (e Event, err error) {
 // It is NOT an issuer service: it reads no node, consumes no consent, checks
 // no issuer clock age, and does not authorize a signature or a transaction.
 // Child assent and by-name evidence integration remain unsupported.
+// Parent bytes are read first; their refusal can precede a grant refusal.
 func Preparation(signed, assent, consent, parent []byte, nameOutput *Outpoint, now int64) (raw []byte, commitment, frame string, err error) {
 	var p *Grant
 	if len(parent) > 0 {
@@ -162,6 +192,11 @@ func Preparation(signed, assent, consent, parent []byte, nameOutput *Outpoint, n
 		err = e
 		return
 	}
+	return prepareChecked(g, assent, consent, nameOutput, now)
+}
+
+// prepareChecked continues W9.4 only after Read has verified the grant.
+func prepareChecked(g *Grant, assent, consent []byte, nameOutput *Outpoint, now int64) (raw []byte, commitment, frame string, err error) {
 	byKey := obj(g.payload, "recipient")["key"] != nil
 	if byKey != (nameOutput == nil) {
 		err = Refusal("ISSUANCE_MODE")
@@ -181,15 +216,39 @@ func Preparation(signed, assent, consent, parent []byte, nameOutput *Outpoint, n
 		err = e
 		return
 	}
+	return assemblePreparation(g, party, sig, event, nameOutput)
+}
+
+// assemblePreparation encodes already verified parts; it performs no admission.
+func assemblePreparation(g *Grant, party, sig string, event Event, nameOutput *Outpoint) (raw []byte, commitment, frame string, err error) {
 	r := object{"event_id": event.ID, "signature": event.Sig}
 	if nameOutput != nil {
 		r["name_output"] = object{"txid": nameOutput.TxID, "vout": json.Number(strconv.FormatUint(uint64(nameOutput.Vout), 10))}
 	}
 	prep := object{"type": IssuanceType, "genesis": g.Genesis(), "contract": g.Contract(), "grant_id": g.ID(), "grant_signature": g.Signature(), "issuer_assent": object{"party": party, "signature": sig}, "recipient_consent": r}
 	raw = encode(prep)
+	if err = readPreparation(raw); err != nil {
+		return nil, "", "", err
+	}
 	commitment = typed(IssuanceType, raw)
 	frame = "6a03534c014202" + commitment + "01" + g.ContentAddress()
 	return
+}
+
+// readPreparation checks stored octets, not the signatures of their parts.
+func readPreparation(raw []byte) (err error) {
+	defer guard(&err)
+	p := parseDocument(raw, 2048).(object)
+	if str(p, "type") != IssuanceType {
+		reject("WIRE_TYPE")
+	}
+	checkSchema(p, record(map[string]*schema{
+		"type": leaf("string"), "genesis": hashSchema, "contract": hashSchema,
+		"grant_id": hashSchema, "grant_signature": leaf("signature"),
+		"issuer_assent":     record(map[string]*schema{"party": signingKey, "signature": leaf("signature")}, ""),
+		"recipient_consent": record(map[string]*schema{"event_id": hashSchema, "signature": leaf("signature"), "name_output": outpoint}, "name_output"),
+	}, ""))
+	return nil
 }
 
 type Outpoint struct {

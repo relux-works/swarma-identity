@@ -197,6 +197,10 @@ func schemaPass(v any, s *schema, pass int) {
 		if !isHex(value, 64) {
 			reject("WIRE_MEMBER")
 		}
+	case "signature":
+		if !isHex(value, 128) {
+			reject("WIRE_MEMBER")
+		}
 	case "output":
 		if !isHex(value, 66) || (value[:2] != "02" && value[:2] != "03") {
 			reject("WIRE_MEMBER")

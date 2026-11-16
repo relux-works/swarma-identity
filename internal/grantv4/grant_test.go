@@ -18,10 +18,16 @@ type vector struct {
 		Parent    string  `json:"parent"`
 		Reference *string `json:"reference"`
 	} `json:"context"`
-	Digest  string `json:"typed_digest"`
-	GrantID string `json:"grant_id"`
-	Address string `json:"content_address"`
-	Script  string `json:"seal_script"`
+	Digest     string   `json:"typed_digest"`
+	GrantID    string   `json:"grant_id"`
+	Address    string   `json:"content_address"`
+	Script     string   `json:"seal_script"`
+	Payload    string   `json:"payload"`
+	Signature  string   `json:"signature"`
+	SignedForm string   `json:"signed_form"`
+	Octets     int      `json:"octets"`
+	Outcomes   []string `json:"outcomes"`
+	Judged     string   `json:"judged"`
 }
 type corpus struct {
 	Valid        []vector `json:"valid"`
@@ -75,11 +81,18 @@ func TestVectors(t *testing.T) {
 		t.Fatal("vector count table changed")
 	}
 	grants := validGrants(t, c)
+	byID := map[string]vector{}
+	for _, v := range c.Valid {
+		byID[v.ID] = v
+	}
 	for _, v := range c.Valid {
 		t.Run(v.ID, func(t *testing.T) {
 			g := grants[v.ID]
 			if g.Digest() != v.Digest || g.ID() != v.GrantID || g.ContentAddress() != v.Address || g.SealScript() != v.Script {
 				t.Fatal("derived values differ from specification")
+			}
+			if (v.Payload != "" && string(g.Payload()) != v.Payload) || g.Signature() != v.Signature || (v.SignedForm != "" && string(g.Signed()) != v.SignedForm) || len(g.Signed()) != v.Octets {
+				t.Fatal("literal vector octets or signature differ")
 			}
 			// Identity expectations are fixed literals, never read from test_keys.
 			if !g.Child() {
@@ -115,15 +128,15 @@ func TestVectors(t *testing.T) {
 				t.Fatal("missing positive control")
 			}
 			parent := grants[v.Context.Parent]
-			if _, e := Read(positive.Signed(), grants["grant-v-03"], nil); e != nil {
+			if _, e := Read(positive.Signed(), grants[byID[control].Context.Parent], byID[control].Context.Reference); e != nil {
 				t.Fatalf("positive control: %v", e)
 			}
 			_, e := Read(octets(t, v.SignedFormHex), parent, v.Context.Reference)
 			if e == nil || e.Error() != v.Expect {
 				t.Fatalf("want %s; got %v", v.Expect, e)
 			}
-			counts[v.Expect]++
 		})
+		counts[v.Expect]++
 	}
 	want := map[string]int{"WIRE_SIZE": 1, "WIRE_NOT_CANONICAL": 1, "WIRE_MEMBER": 34, "WIRE_TYPE": 1, "WIRE_VALUE": 3, "WIRE_INTEGER": 7, "WIRE_KEY": 3, "WIRE_SIGNATURE_FORM": 1, "WIRE_SIGNATURE": 3, "WIRE_ID": 4, "CHILD_SIGNER": 3, "NOT_DELEGABLE": 1, "CHAIN_DEPTH": 1, "GRANT_SHAPE": 5, "GRANT_DELEGATE": 22, "WIRE_JSON": 1, "WIRE_DUPLICATE": 2, "WIRE_NUMBER": 2, "WIRE_STRING": 2}
 	if !reflect.DeepEqual(counts, want) {
@@ -131,6 +144,9 @@ func TestVectors(t *testing.T) {
 	}
 	for _, v := range c.Undetermined {
 		t.Run(v.ID, func(t *testing.T) {
+			if !reflect.DeepEqual(v.Outcomes, []string{"ok", "GRANT_DELEGATE"}) || v.Judged == "" {
+				t.Fatal("proposal outcomes or judged point missing")
+			}
 			if _, e := Read(grants["grant-v-03"].Signed(), nil, nil); e != nil {
 				t.Fatal(e)
 			}
@@ -148,12 +164,14 @@ func TestVectors(t *testing.T) {
 		}
 		for _, entry := range data["valid"].([]any) {
 			m := entry.(map[string]any)
-			g := grants[m["id"].(string)]
-			d, e := Draft(g.Payload(), grants["grant-v-03"])
+			id := m["id"].(string)
+			g := grants[id]
+			parent := grants[byID[id].Context.Parent]
+			d, e := Draft(g.Payload(), parent)
 			if e != nil {
 				t.Fatal(e)
 			}
-			s, e := Attach(d, g.Signature(), grants["grant-v-03"])
+			s, e := Attach(d, g.Signature(), parent)
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -201,7 +219,7 @@ func TestCalendarHeights(t *testing.T) {
 	}
 }
 
-// TestCanonicalDocument proves UTF-16 sorting, literal JCS strings, syntax/depth precedence and globally ordered refusals beside valid canonical controls.
+// TestCanonicalDocument proves UTF-16 sorting, literal JCS strings and globally ordered refusals beside valid canonical controls.
 func TestCanonicalDocument(t *testing.T) {
 	cases := []struct{ good, bad, code string }{
 		{`{"a":1}`, `{"a":1} `, "WIRE_NOT_CANONICAL"},

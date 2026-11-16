@@ -78,6 +78,7 @@ func scopeTextV4(g *grantv4.Grant) []string {
 	}
 	if g.Child() {
 		lines = append(lines, fmt.Sprintf("Child: parent payload identifier %s, row ordinal %d; its delegation key must sign the child, never its messaging key.", p.Parent, p.Ordinal))
+		lines = append(lines, "Parent terms are not displayed; child row fit is not checked.")
 	} else {
 		lines = append(lines, "Root issuer as signed: "+string(g.Issuer())+".")
 	}
@@ -99,9 +100,13 @@ func scopeTextV4(g *grantv4.Grant) []string {
 	return lines
 }
 
-func renderV4(g *grantv4.Grant, value []byte, key KeychainPublic, assent []byte, assentDigest string) (string, *Failure) {
+func renderV4(g *grantv4.Grant, value []byte, key KeychainPublic, assent []byte, assentDigest string, network string, inspectable bool) (string, *Failure) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n=== SWARMA V4 DOCUMENT REVIEW ===\nKeychain label: %s\nSigning key x-only: %s\nAccess policy: %s (this-device-only)\n", key.Label, key.XOnlyKey, key.AccessPolicy)
+	if !inspectable {
+		b.WriteString("Native ACL flags   : unavailable through public Security APIs; authenticated policy metadata is checked before signing.\n")
+	}
+	fmt.Fprintf(&b, "Network: %s (genesis %s)\n", network, g.Genesis())
 	fmt.Fprintf(&b, "Landlord value: NOT VERIFIED BY THIS SIGNER. These %d bytes are stated by the request; no chain was read.\n  %s\n", len(value), escapeBytes(value, true))
 	// A complete canonical payload and every leaf are both shown. Empty arrays
 	// count as fields, so an omitted action or limit list cannot hide in prose.
@@ -224,7 +229,7 @@ func executeKeychainV4(command string, args []string, deps keychainDeps) (string
 	if e != nil || len(stored) != 33 {
 		return network, nil, keychainRefuse("KEY_ITEM_INVALID")
 	}
-	access, _, e := deps.signer.Access(o["label"])
+	access, inspectable, e := deps.signer.Access(o["label"])
 	if e != nil {
 		return network, nil, keychainFailure(e)
 	}
@@ -235,7 +240,7 @@ func executeKeychainV4(command string, args []string, deps keychainDeps) (string
 	if key.XOnlyKey != g.Signer() {
 		return network, nil, keychainRefuse("KEY_MISMATCH")
 	}
-	shown, f := renderV4(g, value, key, assent, digest)
+	shown, f := renderV4(g, value, key, assent, digest, network, inspectable)
 	if f != nil {
 		return network, nil, f
 	}

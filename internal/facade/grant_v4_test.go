@@ -272,6 +272,13 @@ func TestV4DisplayCoverage(t *testing.T) {
 			e, exit := v4KC(t, h, "review-v4", r)
 			mustOK(t, e, exit)
 			shown := h.term.shown.String()
+			wantParentNotice := 0
+			if id == "grant-v-05" {
+				wantParentNotice = 1
+			}
+			if strings.Count(shown, "  Parent terms are not displayed; child row fit is not checked.\n") != wantParentNotice {
+				t.Fatal("parent review limitation text differs")
+			}
 			fields := expectedV4Leaves(t, g.Payload())
 			if len(fields) != count || !strings.Contains(shown, fmt.Sprintf("  committed fields (%d):\n", count)) {
 				t.Fatal("display field count")

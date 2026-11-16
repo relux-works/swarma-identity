@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"strings"
 	"syscall"
 
 	"github.com/relux-works/swarma-identity/internal/grantv4"
@@ -17,18 +18,19 @@ const GrantV4RequestSchema = "swarma-identity/grant-v4/1"
 // documents, never a private key or a digest to be signed. Commands explicitly
 // select v4; no v3 command or decoder changes its interpretation.
 type GrantV4Request struct {
-	Schema     string            `json:"schema"`
-	PayloadHex string            `json:"payload_hex,omitempty"`
-	ParentHex  string            `json:"parent_hex,omitempty"`
-	Signature  string            `json:"signature,omitempty"`
-	Calendar   *GrantV4Calendar  `json:"calendar,omitempty"`
-	CreatedAt  int64             `json:"created_at,omitempty"`
-	SignedHex  string            `json:"signed_hex,omitempty"`
-	AssentHex  string            `json:"assent_hex,omitempty"`
-	ConsentHex string            `json:"consent_hex,omitempty"`
-	NameOutput *grantv4.Outpoint `json:"name_output,omitempty"`
-	Now        int64             `json:"now,omitempty"`
-	FrameHex   string            `json:"frame_hex,omitempty"`
+	members    map[string]json.RawMessage `json:"-"`
+	Schema     string                     `json:"schema"`
+	PayloadHex string                     `json:"payload_hex,omitempty"`
+	ParentHex  string                     `json:"parent_hex,omitempty"`
+	Signature  string                     `json:"signature,omitempty"`
+	Calendar   *GrantV4Calendar           `json:"calendar,omitempty"`
+	CreatedAt  int64                      `json:"created_at,omitempty"`
+	SignedHex  string                     `json:"signed_hex,omitempty"`
+	AssentHex  string                     `json:"assent_hex,omitempty"`
+	ConsentHex string                     `json:"consent_hex,omitempty"`
+	NameOutput *grantv4.Outpoint          `json:"name_output,omitempty"`
+	Now        int64                      `json:"now,omitempty"`
+	FrameHex   string                     `json:"frame_hex,omitempty"`
 }
 type GrantV4Calendar struct {
 	CurrentHeight      uint64 `json:"current_height"`
@@ -125,6 +127,11 @@ func inputV4(path string, dst any) *Failure {
 	if v.Kind() != reflect.Pointer || v.IsNil() || closedObject(raw, v.Elem().Type()) != nil || json.Unmarshal(raw, dst) != nil {
 		return fail("BAD_INPUT")
 	}
+	if r, ok := dst.(*GrantV4Request); ok {
+		if json.Unmarshal(raw, &r.members) != nil {
+			return fail("BAD_INPUT")
+		}
+	}
 	return nil
 }
 func executeGrantV4(command string, args []string) (string, any, *Failure) {
@@ -139,8 +146,31 @@ func executeGrantV4(command string, args []string) (string, any, *Failure) {
 	if r.Schema != GrantV4RequestSchema {
 		return "", nil, fail("BAD_INPUT")
 	}
-	// Reject cross-stage fields instead of silently ignoring supplied signatures
-	// or an alleged frame. Zero-valued time fields are harmless defaults.
+	// Stage membership is about presence, even for empty strings or zero.
+	allowed := " schema parent_hex "
+	switch command {
+	case "grant draft-v4":
+		allowed += "payload_hex calendar "
+	case "grant sign-v4":
+		allowed += "payload_hex calendar signature "
+	case "grant consent-v4":
+		allowed += "payload_hex calendar created_at "
+		if len(r.members["created_at"]) == 0 || string(r.members["created_at"]) == "null" {
+			return "", nil, fail("BAD_INPUT")
+		}
+	case "grant anchor-v4":
+		allowed += "signed_hex assent_hex consent_hex name_output now frame_hex "
+		if len(r.members["now"]) == 0 || string(r.members["now"]) == "null" {
+			return "", nil, fail("BAD_INPUT")
+		}
+	default:
+		return "", nil, fail("BAD_INPUT")
+	}
+	for name := range r.members {
+		if !strings.Contains(allowed, " "+name+" ") {
+			return "", nil, fail("BAD_INPUT")
+		}
+	}
 	switch command {
 	case "grant draft-v4", "grant sign-v4", "grant consent-v4":
 		if r.SignedHex != "" || r.AssentHex != "" || r.ConsentHex != "" || r.NameOutput != nil || r.Now != 0 || r.FrameHex != "" || (command != "grant sign-v4" && r.Signature != "") || (command != "grant consent-v4" && r.CreatedAt != 0) {
