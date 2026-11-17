@@ -188,6 +188,11 @@ func executeKeychainV4(command string, args []string, deps keychainDeps) (string
 	if r.Schema != KeychainV4Schema || !validLabel(o["label"]) {
 		return "", nil, fail("BAD_INPUT")
 	}
+	// The label reserved for the static-gate key signs no grant request
+	// (keychain_sign_static_gate.go).
+	if f := refuseStaticGateKeyForGrant(o["label"]); f != nil {
+		return "", nil, f
+	}
 	g, parent, f := draftV4(GrantV4Request{PayloadHex: r.PayloadHex, ParentHex: r.ParentHex})
 	if f != nil {
 		return "", nil, f

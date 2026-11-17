@@ -100,7 +100,10 @@ func staticGateRefuse(code string) *Failure {
 
 // refuseStaticGateKeyForGrant is the grant half of the key separation: the
 // label reserved for the static-gate key signs no grant request (contract,
-// grant or seal spend, under sign/1 or sign/2). The other half is in
+// grant or seal spend under sign/1 or sign/2, and no v4 root contract
+// assent under sign-v4; review-v4 shares the v4 entry and is refused with
+// it, before any key read). Every grant-signing entry calls this one guard
+// before any Public, Access, display or signature. The other half is in
 // signStaticGate: no other label signs a static-gate statement. A label holds
 // one key and keygen never imports one, so no key serves both purposes.
 func refuseStaticGateKeyForGrant(label string) *Failure {

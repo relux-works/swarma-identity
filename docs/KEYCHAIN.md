@@ -184,7 +184,7 @@ is still required for actual Touch ID/passcode and enrollment semantics.
 
 This is the request for a `/1` draft. A `/2` draft from `grant draft-v2` needs `swarma-keychain/sign/2`, described [below](#swarma-keychainsign2-the-depth-zero-swarma-trust-contract2-draft); the two do not mix.
 
-A `swarma-s7 static-gate/1` statement is not a grant request: it has its own schema, `swarma-keychain/sign-static-gate/1`, and its own key, described [further below](#swarma-keychainsign-static-gate1-one-swarma-s7-static-gate1-statement). The label `swarma-static-gate-g1` is reserved for that key, and a `sign/1` or `sign/2` request under it is refused with `KEY_PURPOSE`.
+A `swarma-s7 static-gate/1` statement is not a grant request: it has its own schema, `swarma-keychain/sign-static-gate/1`, and its own key, described [further below](#swarma-keychainsign-static-gate1-one-swarma-s7-static-gate1-statement). The label `swarma-static-gate-g1` is reserved for that key, and a `sign/1`, `sign/2` or `sign-v4` request under it (and `review-v4`, which shares the v4 entry) is refused with `KEY_PURPOSE`.
 
 - `to_sign` entries are copied from PR 8's output: `grant draft` and `grant consent` give `contract_sha256`, and `grant sign` stage `grant_hash` gives `grant_signing_hash`. Only `signer:"landlord"` entries are accepted, and their key must be this item's key. The draft's `issuer_key` must also be this key, otherwise the request is refused with `KEY_MISMATCH`.
 - `seal_spend` is optional and takes exactly one of two forms:
@@ -330,7 +330,7 @@ The request's `digest` must equal the rebuilt digest, otherwise the request is r
 | Request | `--label swarma-static-gate-g1` | any other label |
 | --- | --- | --- |
 | `sign-static-gate/1`, purpose `static_gate` | proceeds to the checks below | `KEY_PURPOSE` |
-| `sign/1` or `sign/2`: `contract_sha256`, `grant_signing_hash`, a seal spend, or any other entry | `KEY_PURPOSE` | as before |
+| `sign/1`, `sign/2` or `sign-v4` (and `review-v4`): `contract_sha256`, `grant_signing_hash`, a seal spend, a v4 root contract assent, or any other entry | `KEY_PURPOSE` | as before |
 
 A label holds one key, and `keygen` creates a key and never imports one, so no key can serve both purposes. The static-gate key is created in its own `keygen` run under that label. Under that label `keygen` accepts only `biometry-current-set` (the default) and refuses any other `--access` value with `STATIC_GATE_KEY_ACCESS` before any store call. `keygen` prints a `p2pkh_address` for this key as for any other; the address has no use and must not be funded, because this key signs no spend.
 
