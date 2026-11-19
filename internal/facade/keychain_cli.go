@@ -53,7 +53,7 @@ func keychainOptions(args []string, names ...string) (map[string]string, *Failur
 func RunKeychain(ctx context.Context, args []string, stdout, stderr io.Writer, signer GrantKeySigner) int {
 	if len(args) >= 2 {
 		switch args[0] + " " + args[1] {
-		case "keychain keygen", "keychain sign", "keychain review-v4", "keychain sign-v4", "value build":
+		case "keychain keygen", "keychain sign", "keychain review-v4", "keychain sign-v4", "value build", "seal sign":
 			return run(ctx, args, stdout, stderr, keychainDeps{signer: signer, terminal: openTTY})
 		}
 	}

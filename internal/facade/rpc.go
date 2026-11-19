@@ -148,6 +148,10 @@ func (c *Client) call(ctx context.Context, method string, params []any) (json.Ra
 	if !allowed {
 		return nil, fail("UNSUPPORTED_CAPABILITY")
 	}
+	return c.rpcCall(ctx, method, params)
+}
+
+func (c *Client) rpcCall(ctx context.Context, method string, params []any) (json.RawMessage, *Failure) {
 	if method != "scantxoutset" {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)

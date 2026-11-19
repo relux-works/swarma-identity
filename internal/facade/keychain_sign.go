@@ -71,16 +71,19 @@ func openTTY() (Terminal, error) {
 
 func (t *ttyTerminal) Show(text string) error { _, err := io.WriteString(t.f, text); return err }
 
+func (t *ttyTerminal) Close() error { return t.f.Close() }
+
 // Confirm accepts only the exact confirmation word on one line.
 func (t *ttyTerminal) Confirm(prompt string) (bool, error) {
 	if _, err := io.WriteString(t.f, prompt); err != nil {
 		return false, err
 	}
 	line, err := bufio.NewReader(io.LimitReader(t.f, 64)).ReadString('\n')
-	if err != nil && line == "" {
+	if err != nil {
 		return false, err
 	}
-	return strings.TrimRight(line, "\r\n") == confirmWord, nil
+	line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	return line == confirmWord, nil
 }
 
 // keychainCodes are the signer's error codes (internal/keychain and

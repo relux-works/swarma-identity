@@ -376,11 +376,19 @@ func (l *sealLedger) record(e SealEntry) *Failure {
 // writer read, every entry of which is in the new ledger. A temporary file
 // whose undo was not verified is kept, and the fence then holds.
 func (l *sealLedger) commit(entries []SealEntry) *Failure {
-	if !l.locked || l.dir < 0 {
-		return refuse("LEDGER_FILE")
-	}
 	raw, ok := compactJSON(sealLedgerFile{SealLedgerSchema, entries})
 	if !ok || len(raw) > sealLedgerMax {
+		return refuse("LEDGER_FILE")
+	}
+	if failure := l.commitDocument(raw); failure != nil {
+		return failure
+	}
+	l.entries = entries
+	return nil
+}
+
+func (l *sealLedger) commitDocument(raw []byte) *Failure {
+	if !l.locked || l.dir < 0 {
 		return refuse("LEDGER_FILE")
 	}
 	var suffix [8]byte
@@ -422,7 +430,6 @@ func (l *sealLedger) commit(entries []SealEntry) *Failure {
 	if !l.bound() {
 		return refuse("LEDGER_FILE") // the path no longer names the locked directory
 	}
-	l.entries = entries
 	l.held = &mine
 	return nil
 }

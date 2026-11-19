@@ -24,9 +24,11 @@ external signature assembly, review, root contract assents, and root/by-key
 preparation/anchor frames. It is **not a live issuer** and has no private-key
 grant-signing route. See [the v4 scope and explicit blockers](docs/GRANT_V4.md).
 
-Node deployment/lifecycle, name transactions, transaction signing/broadcast, live grant verification, Nostr publication and NIP-05 resolution remain planned. Wallet-visible balance is not implemented. No plugin registration interface is exposed by this version.
+The separate [v3 seal lifecycle](docs/SEAL.md) adds offline `seal plan`, signer-only `seal sign`, one-attempt `seal broadcast`, and read-only `seal observe`, with a durable per-grant journal. This does not change the unsigned `grant seal`/`grant anchor` interfaces. The new workflow is tested with regtest protocol fixtures, not qualified for production custody or live-node policy.
 
-The CLI uses no private keys or signer. The grant commands only exchange digests and public BIP-340 signatures with each party's own external signer; the test-only signer in `internal/testsigner` is not linked into the binary and loads only published BIP-340 test keys. Public derivation and both Nostr operations work without a node, wallet or relay. Online commands read only the selected node and never import a wallet, sign, broadcast, restart a service or automatically retry a scan. Validating a Nostr signature establishes no publication, freshness or identity authority.
+Node deployment/lifecycle, name transactions, general transaction signing/broadcast, live grant verification, Nostr publication and NIP-05 resolution remain planned. Wallet-visible balance is not implemented. No plugin registration interface is exposed by this version.
+
+The identity binary uses no private keys or signer. The grant commands only exchange digests and public BIP-340 signatures with each party's own external signer; the test-only signer in `internal/testsigner` is not linked into the binary and loads only published BIP-340 test keys. Public derivation and both Nostr operations work without a node, wallet or relay. Ordinary online reads never import a wallet, sign, broadcast, restart a service or automatically retry a scan. The separate `seal broadcast` command alone can send the exact journaled transaction once, using explicit, separate broadcast credentials. Validating a Nostr signature establishes no publication, freshness or identity authority.
 
 ## Build and use
 
@@ -80,6 +82,7 @@ Scratch output goes to `.temp/`, which Git ignores.
 | gofmt | Format: `gofmt -w cmd internal`. | Updates those source files. |
 | swarma-identity | The commands above and the offline `registration` commands below; every invocation requires `--json`. | One JSON envelope on stdout; fixed bounded diagnostics on stderr. |
 | swarma-keychain | darwin/cgo only: `keychain keygen`, `keychain sign`, `value build` ([docs/KEYCHAIN.md](docs/KEYCHAIN.md)). | One JSON envelope on stdout. The signing display and the confirmation use `/dev/tty`. |
+| Grant seal lifecycle | `swarma-identity seal plan`, `seal broadcast`, `seal observe`; `swarma-keychain seal sign`. Exact flags and configuration: [operator runbook](docs/SEAL.md). | Explicit owner-only per-grant journal; keep local inputs/logs under `.temp/`. Signing display and exact SIGN confirmation use `/dev/tty`. |
 | Developer ID bundle (macOS) | `go run ./cmd/build-keychain-bundle PROFILE [OUTPUT.app]` builds the release signer, embeds the owner-supplied provisioning profile, signs with the Relux Works Developer ID Application identity and runs `codesign --verify --strict`. See [the recipe and Mac acceptance gate](docs/KEYCHAIN.md#developer-id-signing-for-the-data-protection-keychain). | Default `.temp/SwarmaKeychain.app` and `.temp/SwarmaKeychain.entitlements.plist`. |
 | Keychain tests (macOS) | `security create-keychain -p PW "$RUNNER_TEMP/swarma-test-X.keychain-db"`, unlock it, then `SWARMA_KEYCHAIN_TEST_PATH=<that path> go test -tags keychaintest -p 1 -parallel 2 -run 'TestTestKeychain\|TestKeychainDarwin' ./internal/keychain/ ./internal/facade/`. The `keychaintest` tag is for tests only and never goes into release builds. | Throwaway test keychain only; never the login keychain. |
 
@@ -93,8 +96,11 @@ Transaction requests use explicitly supplied native P2WPKH funding outpoints,
 full public parent transactions and a separate funding/change script pin.
 They select no wallet or key. The seal creation floor is 100000 atoms, following
 the pinned implementation profile; the LIP specifies no numeric denomination.
-There is no broadcast flag. External signing/publication and confirmed observation
-remain required. `grant sign` retains its local-ledger checks; the chain seal
+There is no broadcast flag on these unsigned grant commands. The separate
+[seal lifecycle](docs/SEAL.md) can sign and publish only the reconstructed v3
+seal named by its grant, with explicit approval and an at-most-once journal.
+Anchor signing/publication and confirmed verification remain separate.
+`grant sign` retains its local-ledger checks; the chain seal
 pre-check runs in `grant anchor`. See [request schemas and refusal codes](docs/GRANT.md#grant-seal---config-file---request-file---json).
 
 Transaction tests reuse the grant loopback RPC fake, freeze the 72-byte frame,

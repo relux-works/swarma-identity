@@ -49,6 +49,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, deps keyc
 	f := fail("BAD_INPUT")
 	if len(args) >= 2 {
 		switch args[0] + " " + args[1] {
+		case "seal plan", "seal sign", "seal broadcast", "seal observe":
+			e.Command = args[0] + " " + args[1]
+			e.Network, e.Result, f = executeSeal(ctx, e.Command, args[2:], deps)
 		case "node health", "name show", "identity show", "address derive", "balance watch", "nostr profile-prepare", "nostr profile-verify", "grant draft", "grant consent", "grant sign", "grant ledger-recover", "grant seal", "grant anchor":
 			e.Command = args[0] + " " + args[1]
 			e.Network, e.Result, f = execute(ctx, e.Command, args[2:])

@@ -26,6 +26,10 @@ The auth file contains `username:password` (including the node's cookie format),
 
 ## Commands and requests
 
+The separate `seal plan`, `seal broadcast`, `seal observe` and signer-only
+`swarma-keychain seal sign` interfaces are specified in [SEAL.md](SEAL.md).
+They do not add write permissions to the normal read-only RPC interface.
+
 `node health --config FILE --json` returns `node_id,backend_version,genesis_hash,block_hash,blocks,headers,initial_block_download,verification_progress,connections`. An unsynced node is a valid health observation; name and balance operations refuse it.
 
 `name show --config FILE --request FILE --json` accepts exactly `{"name":"d/example"}`. Names are 1..255 UTF-8 bytes and are sent without normalization. The RPC explicitly selects UTF-8 names, hex values and expired-record visibility. Active results contain `name,value_hex,expires_in,expired,txid,vout,height,observed_tip`. Hex values represent at most 520 bytes. Missing and expired names are distinct refusals. This raw read does not establish Link, Nostr, domain or identity authority.

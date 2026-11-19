@@ -1,5 +1,17 @@
 # Open product decisions
 
+- Seal lifecycle production qualification is pending: real Core mempool policy,
+  RPC ACLs/index availability, native funding-key authentication/display, and
+  authoritative journal custody must be checked by the operator before use.
+  Current evidence uses only regtest protocol fixtures and published test keys.
+- At specification v0.1.61, the contract-seal construction rows in LIP-0017
+  section 6 (issuer only, either party, both together, arbiter), canonical v4
+  contract presentation and v4 lifecycle integration remain outside this v3
+  implementation. Minimal v3 contracts remain unchanged; this is not a stop
+  on the closed P2PKH grant-seal profile. No lifecycle-journal reset/recovery or
+  alternate pool transaction construction is implemented; uncertain attempts
+  require operator reconciliation, never blind resubmission. See `docs/SEAL.md`.
+
 - Live qualification requires the node custodian to select the endpoint, credential-file path and finite read/scan scope. Unit fixtures establish no live-node permission.
 - Supporting other Core versions or non-loopback transports requires separate capability and transport qualification.
 - Wallet-visible balance requires a separately provisioned and qualified watch-only wallet; it is not implemented or automatically substituted.
