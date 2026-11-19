@@ -26,7 +26,7 @@ func keychainOptions(args []string, names ...string) (map[string]string, *Failur
 		if _, dup := got[name]; !allowed[name] || dup {
 			return nil, fail("BAD_INPUT")
 		}
-		if name == "json" {
+		if name == "json" || name == "allow-mainnet" {
 			if inline {
 				return nil, fail("BAD_INPUT")
 			}

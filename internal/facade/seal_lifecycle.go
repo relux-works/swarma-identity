@@ -106,8 +106,45 @@ func (journal *sealJournal) result() *SealLifecycleResult {
 	return &SealLifecycleResult{journal.GrantID, journal.State, journal.Plan.UnsignedTxID, journal.Plan, sealSummary(journal.GrantID, &journal.Plan), journal.Attempted, journal.Attempted && journal.State == "accepted", journal.Confirmations, journal.ObservedTip}
 }
 
+func sealNetworkOptions(options map[string]string) *Failure {
+	if pinnedGenesis(options["network"]) == "" {
+		return fail("BAD_INPUT")
+	}
+	_, allowed := options["allow-mainnet"]
+	confirmation, confirmed := options["confirm-mainnet"]
+	if options["network"] == "main" {
+		if !allowed {
+			return refuse("SEAL_MAINNET_OPT_IN_REQUIRED")
+		}
+		if !confirmed || confirmation != "MAINNET" {
+			return refuse("SEAL_MAINNET_CONFIRMATION_REQUIRED")
+		}
+	} else if allowed || confirmed {
+		return fail("BAD_INPUT")
+	}
+	return nil
+}
+
+func sealRequestPins(request SealPlanRequest, network, issuer string) *Failure {
+	if request.Network != network {
+		return refuse("NETWORK_PIN")
+	}
+	raw, ok := grantBase64(request.SignedGrantB64)
+	if !ok {
+		return fail("BAD_INPUT")
+	}
+	signed, err := rental.ParseSignedGrant(raw)
+	if err != nil {
+		return rentalRefusal(err)
+	}
+	if signed.Grant.IssuerKey != issuer {
+		return refuse("SEAL_ISSUER_MISMATCH")
+	}
+	return nil
+}
+
 func executeSeal(ctx context.Context, command string, args []string, deps keychainDeps) (string, any, *Failure) {
-	names := []string{"journal"}
+	names := []string{"journal", "network", "issuer-key"}
 	switch command {
 	case "seal plan":
 		names = append(names, "request")
@@ -118,7 +155,7 @@ func executeSeal(ctx context.Context, command string, args []string, deps keycha
 	case "seal observe":
 		names = append(names, "config")
 	}
-	options, failure := keychainOptions(args, names...)
+	options, failure := keychainOptions(args, append(names, "allow-mainnet", "confirm-mainnet")...)
 	if failure != nil {
 		return "", nil, failure
 	}
@@ -126,6 +163,9 @@ func executeSeal(ctx context.Context, command string, args []string, deps keycha
 		if options[name] == "" {
 			return "", nil, fail("BAD_INPUT")
 		}
+	}
+	if failure := sealNetworkOptions(options); failure != nil {
+		return "", nil, failure
 	}
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
@@ -135,6 +175,9 @@ func executeSeal(ctx context.Context, command string, args []string, deps keycha
 		if failure := inputFile(options["request"], request); failure != nil {
 			return "", nil, failure
 		}
+		if failure := sealRequestPins(*request, options["network"], options["issuer-key"]); failure != nil {
+			return "", nil, failure
+		}
 	}
 	journal, failure := openSealJournal(ctx, options["journal"], request)
 	if failure != nil {
@@ -142,6 +185,9 @@ func executeSeal(ctx context.Context, command string, args []string, deps keycha
 	}
 	defer journal.guard.close()
 	network := journal.Request.Network
+	if failure := sealRequestPins(journal.Request, options["network"], options["issuer-key"]); failure != nil {
+		return network, nil, failure
+	}
 	switch command {
 	case "seal sign":
 		failure = journal.sign(deps, options["label"])
@@ -252,6 +298,10 @@ func (journal *sealJournal) broadcast(ctx context.Context, readPath, writePath s
 		prevout, parentOK := prevTxOutput(input.PrevTxHex, parentHash)
 		if !ok || !valid || !parentOK || !member(view, "bestblock", &best) || best != health.BlockHash || !member(view, "scriptPubKey", &script) || !member(script, "hex", &scriptHex) || amount != prevout.Value || scriptHex != journal.Request.Funding.ScriptHex {
 			return refuse("SEAL_FUNDING_UNAVAILABLE")
+		}
+		var confirmations int64
+		if !member(view, "confirmations", &confirmations) || confirmations < 1 {
+			return refuse("SEAL_FUNDING_UNCONFIRMED")
 		}
 	}
 	decoded, failure := sealRead(ctx, reader, "decoderawtransaction", []any{journal.SignedTxHex, true})

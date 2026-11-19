@@ -69,6 +69,14 @@ The node custodian must authorize online use and select the credential file. A s
 
 See [the CLI contract](docs/CLI.md) for input schemas, result fields, deadlines and refusals, and [the module skill](agents/skills/swarma-identity/SKILL.md) for agent use. Keep account-specific inputs and qualification evidence in ignored local files. Never put credentials or private keys in command arguments or diagnostics.
 
+The [v3 seal lifecycle runbook](docs/SEAL.md) requires an explicit `--network`
+and independent operator `--issuer-key` on every plan/sign/broadcast/observe
+invocation. Mainnet has no default path: both `--allow-mainnet` and the separate
+`--confirm-mainnet MAINNET` are required, in addition to normal signer approval.
+Preflight refuses any funding parent without a present, positive confirmation
+count before recording acceptance or a broadcast attempt. Qualification remains
+regtest fixtures only; no mainnet operation or real signing key is exercised.
+
 ## Development
 
 Scratch output goes to `.temp/`, which Git ignores.

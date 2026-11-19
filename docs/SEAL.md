@@ -10,11 +10,39 @@ a contract seal, an anchor, or a live-grant verifier.
 The semantic pin is swarma-link-spec **v0.1.61**, commit
 `464c445fd52ce0ec8bdc52c0ead8a866a7b77f56`, specifically LIP-0017 sections
 5.7 and 6 and LIP-0020 W11.11. A minimal landed v3 contract still needs no
-separate contract seal. Requiring one here would contradict that pin.
+separate contract seal. Whether decision C12 extends that requirement to v3
+despite C8 remains open; this tool does not settle it. The original brief
+negative requiring a contract seal is deferred pending that owner decision,
+not claimed as implemented. See `UNRESOLVED_QUESTIONS.md`.
 The four contract termination-script rows (issuer only, either party,
 both together, arbiter) do not define canonical constructions for this
 tool to invent. V4/framework contract presentation, scripts and issuance
 integration remain outside this v3 interface.
+
+Only `swarma-trust-contract/1` is supported here. V3 grants bound to contract
+profile `/2` remain safely refused and are outside this lifecycle scope.
+
+## Explicit network and operator identity
+
+Every lifecycle command requires `--network` and `--issuer-key`; neither has
+a default. The network must match the request, issued grant and journal, and
+the independent operator-supplied x-only issuer key must match the grant.
+Obtain that expected issuer key from the operator trusted issuance record,
+not by copying an untrusted plan file. It is distinct from the funding key.
+Missing required inputs refuse `BAD_INPUT`; mismatches refuse `NETWORK_PIN`
+or `SEAL_ISSUER_MISMATCH` before any new journal, signature or RPC operation.
+This is an explicit issuer pin, not a lookup in the separate issuance ledger.
+
+For network `main`, every invocation additionally requires the boolean flag
+`--allow-mainnet` AND the separate exact confirmation `--confirm-mainnet MAINNET`.
+Without the flag it refuses `SEAL_MAINNET_OPT_IN_REQUIRED`; with the flag but
+without that exact confirmation it refuses `SEAL_MAINNET_CONFIRMATION_REQUIRED`.
+The normal terminal `SIGN` is still independently required for signing and
+does not substitute for either mainnet input. Mainnet options on other networks
+refuse `BAD_INPUT`. These are authorization gates, not production qualification:
+all transaction/signing/RPC controls below run on regtest fixtures only. Tests
+only inspect mainnet gates with public fixture grants; no mainnet transaction
+is signed or broadcast.
 
 Existing sources are reused, not redefined: Swarma book, Link chapter 4
 (`link-book/ru/04-doverennost.md`, section on the seal and pool), LIP-0004,
@@ -78,7 +106,7 @@ Choose one durable, owner-controlled journal directory. Use its absolute,
 physical path, without symlinks, and the basename `<grant_id>.seal.json`:
 
 ```sh
-swarma-identity seal plan --request plan.json --journal "$JOURNAL" --json
+swarma-identity seal plan --network regtest --issuer-key "$ISSUER_KEY" --request plan.json --journal "$JOURNAL" --json
 ```
 
 Planning is offline and creates the journal only after validation. A repeated
@@ -91,7 +119,7 @@ cryptographic proof against its owner editing or rolling back the filesystem.
 ## Review and sign offline
 
 ```sh
-swarma-keychain seal sign --journal "$JOURNAL" --label "$FUNDING_LABEL" --json
+swarma-keychain seal sign --network regtest --issuer-key "$ISSUER_KEY" --journal "$JOURNAL" --label "$FUNDING_LABEL" --json
 ```
 
 Only the signer binary has the custody seam. `swarma-identity seal sign`
@@ -99,7 +127,9 @@ refuses `UNSUPPORTED_CAPABILITY`; Linux/non-native signers keep their existing
 unsupported behavior. The reserved static-gate label cannot fund a grant.
 
 The existing controlling-terminal display shows the summary, grant id,
-network/genesis, funding public key and label, access policy and native ACL
+network/genesis, landlord and agent names, independently pinned issuer key,
+the statement that the seal pays P2PKH(even-y issuer key), funding public key
+and label, access policy and native ACL
 inspection limits, PSBT, every
 input/sequence/amount/parent script, every output/amount/script, exact fee,
 caps, version, locktime and SIGHASH_ALL without ANYONECANPAY. The operator must
@@ -130,12 +160,20 @@ claim about server-side ACL installation. The normal read-only RPC fence
 continues to refuse broadcasting and wallet operations.
 
 ```sh
-swarma-identity seal broadcast --journal "$JOURNAL" --config read.json --broadcast-config broadcast.json --json
+swarma-identity seal broadcast --network regtest --issuer-key "$ISSUER_KEY" --journal "$JOURNAL" --config read.json --broadcast-config broadcast.json --json
 ```
 
 The command validates the journal and every signature, checks Core 28.0,
 network/genesis and sync, reads every funding input with mempool-inclusive
-`gettxout`, decodes the exact signed transaction, compares every decoded output
+`gettxout`, and requires an integer `confirmations` present and at least 1 for
+**every** funding parent. Missing, malformed, negative or zero depth refuses
+`SEAL_FUNDING_UNCONFIRMED` before `accepted` or `broadcast_attempted` is journaled,
+without consuming the first attempt. Missing/spent or otherwise inconsistent
+funding still refuses `SEAL_FUNDING_UNAVAILABLE`. The confirmed-parent rule
+reuses the pinned chain-lab W witness profile: an ordinary funding parent must
+already be confirmed before the seal block, not mined alongside its child.
+This prevents `W_UNCONFIRMED_NON_LINKAGE_PARENT` at the reference verifier.
+After that check, the command decodes the exact signed transaction, compares every decoded output
 to the plan, and calls `testmempoolaccept` with the pinned rate cap. Returned
 txid, acceptance, base fee and vsize must match the reviewed plan. A final tip
 check precedes the attempt. These sequential reads are not an atomic node
@@ -160,7 +198,7 @@ transaction to make an uncertain operation retry.
 ## Observe and recover without sending
 
 ```sh
-swarma-identity seal observe --journal "$JOURNAL" --config read.json --json
+swarma-identity seal observe --network regtest --issuer-key "$ISSUER_KEY" --journal "$JOURNAL" --config read.json --json
 ```
 
 Observation requires a recorded attempt and uses only the verifier user. It

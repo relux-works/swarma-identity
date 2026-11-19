@@ -29,10 +29,16 @@ type sealLifecycleFixture struct {
 	request        SealPlanRequest
 	plan           GrantTransaction
 	path           string
+	issuer         string
 	node           *sealRPCFixture
 }
 
 func newSealFixture(testingContext *testing.T) *sealLifecycleFixture {
+	testingContext.Helper()
+	return newSealFixtureNetwork(testingContext, "regtest")
+}
+
+func newSealFixtureNetwork(testingContext *testing.T, network string) *sealLifecycleFixture {
 	testingContext.Helper()
 	harness := newKCWithStore(testingContext, confirmWord, keychainfake.New(), bip340Secrets[keyOther])
 	public, err := harness.deps.signer.Public(kcLabel)
@@ -40,7 +46,7 @@ func newSealFixture(testingContext *testing.T) *sealLifecycleFixture {
 		testingContext.Fatal(err)
 	}
 	funding := grantTestFunding(testingContext, "0014"+hex.EncodeToString(btcutil.Hash160(public)), 1000000)
-	flow := newFlow(testingContext, "regtest", "id/landlord-a", "id/landlord-a-agent")
+	flow := newFlow(testingContext, network, "id/landlord-a", "id/landlord-a-agent")
 	script, err := rental.GrantSealScript(flow.landlord.PublicKey())
 	if err != nil {
 		testingContext.Fatal(err)
@@ -54,39 +60,50 @@ func newSealFixture(testingContext *testing.T) *sealLifecycleFixture {
 		testingContext.Fatal(failure)
 	}
 	request := regtestRequest([]string{"instruct", "review"}, []string{}, 0)
+	request.Network = network
 	request.Seal = rental.Point{TxID: plan.UnsignedTxID, Vout: 0}
 	flow.issue(request)
 	fixture := &sealLifecycleFixture{testingContext: testingContext, harness: harness, plan: *plan, request: SealPlanRequest{
-		Schema: SealPlanSchema, Network: "regtest", SignedGrantB64: flow.signed.SignedGrantB64, ContractB64: flow.signed.ContractB64,
+		Schema: SealPlanSchema, Network: network, SignedGrantB64: flow.signed.SignedGrantB64, ContractB64: flow.signed.ContractB64,
 		AmountSat: minGrantSealAtoms, Funding: funding, FundingPubkey: hex.EncodeToString(public), MaxFeeSat: 10000, MaxFeeRateSatVByte: 10, MinConfirmations: 3,
 	}}
 	fixture.path = filepath.Join(canonicalTemp(testingContext), flow.signed.GrantID+".seal.json")
+	fixture.issuer = flow.landlord.PublicKey()
 	fixture.node = newSealRPCFixture(testingContext, fixture)
 	return fixture
 }
 
+func (fixture *sealLifecycleFixture) options(args ...string) []string {
+	return append(args, "--network", fixture.request.Network, "--issuer-key", fixture.issuer)
+}
+
+func (fixture *sealLifecycleFixture) run(args ...string) (Envelope, int) {
+	fixture.testingContext.Helper()
+	return fixture.harness.run(fixture.options(args...)...)
+}
+
 func (fixture *sealLifecycleFixture) planned() {
 	fixture.testingContext.Helper()
-	envelope, code := fixture.harness.run("seal", "plan", "--request", writeInput(fixture.testingContext, fixture.request), "--journal", fixture.path)
+	envelope, code := fixture.run("seal", "plan", "--request", writeInput(fixture.testingContext, fixture.request), "--journal", fixture.path)
 	mustOK(fixture.testingContext, envelope, code)
 }
 
 func (fixture *sealLifecycleFixture) signed() {
 	fixture.testingContext.Helper()
 	fixture.planned()
-	envelope, code := fixture.harness.run("seal", "sign", "--journal", fixture.path, "--label", kcLabel)
+	envelope, code := fixture.run("seal", "sign", "--journal", fixture.path, "--label", kcLabel)
 	mustOK(fixture.testingContext, envelope, code)
 }
 
 func (fixture *sealLifecycleFixture) broadcast() (Envelope, int) {
 	fixture.testingContext.Helper()
-	envelope, code, _ := runCLI(fixture.testingContext, "seal", "broadcast", "--journal", fixture.path, "--config", fixture.node.read, "--broadcast-config", fixture.node.write, "--json")
+	envelope, code, _ := runCLI(fixture.testingContext, fixture.options("seal", "broadcast", "--journal", fixture.path, "--config", fixture.node.read, "--broadcast-config", fixture.node.write, "--json")...)
 	return envelope, code
 }
 
 func (fixture *sealLifecycleFixture) observe() (Envelope, int) {
 	fixture.testingContext.Helper()
-	envelope, code, _ := runCLI(fixture.testingContext, "seal", "observe", "--journal", fixture.path, "--config", fixture.node.read, "--json")
+	envelope, code, _ := runCLI(fixture.testingContext, fixture.options("seal", "observe", "--journal", fixture.path, "--config", fixture.node.read, "--json")...)
 	return envelope, code
 }
 
@@ -152,9 +169,16 @@ func newSealRPCFixture(testingContext *testing.T, fixture *sealLifecycleFixture)
 			if node.mode == "wrong-network" {
 				chain = "test"
 			}
-			result = map[string]any{"chain": chain, "bestblockhash": fixtureTip, "blocks": 100, "headers": 100, "initialblockdownload": false, "verificationprogress": 1}
+			result = map[string]any{"chain": chain, "bestblockhash": fixtureTip, "blocks": 100, "headers": 100, "initialblockdownload": node.mode == "unsynced", "verificationprogress": 1}
 		case "getbestblockhash":
 			result = fixtureTip
+			if node.mode == "tip-moved" {
+				for _, method := range node.methods {
+					if method == "testmempoolaccept" {
+						result = sealA
+					}
+				}
+			}
 		case "getblockhash":
 			var height int64
 			if len(query.Params) != 1 || json.Unmarshal(query.Params[0], &height) != nil {
@@ -165,20 +189,42 @@ func newSealRPCFixture(testingContext *testing.T, fixture *sealLifecycleFixture)
 			if height != 0 {
 				result = sealB
 			}
-			if height != 0 && node.mode == "inactive-block" {
+			if height != 0 && (node.mode == "inactive-block" || node.mode == "inactive-block-inflated-depth") {
 				result = sealA
 			}
 		case "gettxout":
 			var txid string
 			var vout uint32
 			var mempool bool
-			input := fixture.request.Funding.Inputs[0]
-			if len(query.Params) != 3 || json.Unmarshal(query.Params[0], &txid) != nil || json.Unmarshal(query.Params[1], &vout) != nil || json.Unmarshal(query.Params[2], &mempool) != nil || txid != input.TxID || vout != input.Vout || !mempool {
+			if len(query.Params) != 3 || json.Unmarshal(query.Params[0], &txid) != nil || json.Unmarshal(query.Params[1], &vout) != nil || json.Unmarshal(query.Params[2], &mempool) != nil || !mempool {
+				bad()
+				break
+			}
+			matched := false
+			for _, input := range fixture.request.Funding.Inputs {
+				matched = matched || (txid == input.TxID && vout == input.Vout)
+			}
+			if !matched {
 				bad()
 				break
 			}
 			if node.mode != "missing-input" {
-				result = map[string]any{"bestblock": fixtureTip, "value": atomJSON(1000000), "confirmations": 1, "scriptPubKey": map[string]any{"hex": fixture.request.Funding.ScriptHex}}
+				view := map[string]any{"bestblock": fixtureTip, "value": atomJSON(1000000), "confirmations": 1, "coinbase": false, "scriptPubKey": map[string]any{"hex": fixture.request.Funding.ScriptHex}}
+				switch node.mode {
+				case "unconfirmed-parent":
+					view["confirmations"] = 0
+				case "missing-confirmations":
+					delete(view, "confirmations")
+				case "invalid-confirmations":
+					view["confirmations"] = "1"
+				case "negative-confirmations":
+					view["confirmations"] = -1
+				case "second-unconfirmed-parent":
+					if vout == 1 {
+						view["confirmations"] = 0
+					}
+				}
+				result = view
 			}
 		case "decoderawtransaction":
 			var raw string
@@ -215,16 +261,24 @@ func newSealRPCFixture(testingContext *testing.T, fixture *sealLifecycleFixture)
 			}
 			decoded, err := hex.DecodeString(transactions[0])
 			transaction := wire.NewMsgTx(2)
-			if err != nil || transaction.Deserialize(bytes.NewReader(decoded)) != nil || len(transaction.TxIn) != 1 {
+			if err != nil || transaction.Deserialize(bytes.NewReader(decoded)) != nil || len(transaction.TxIn) != len(fixture.request.Funding.Inputs) {
 				bad()
 				break
 			}
 			script, _ := hex.DecodeString(fixture.request.Funding.ScriptHex)
-			fetcher := txscript.NewCannedPrevOutputFetcher(script, 1000000)
+			fetcher := txscript.NewMultiPrevOutFetcher(nil)
+			for _, input := range transaction.TxIn {
+				fetcher.AddPrevOut(input.PreviousOutPoint, wire.NewTxOut(1000000, script))
+			}
 			hashes := txscript.NewTxSigHashes(transaction, fetcher)
-			engine, err := txscript.NewEngine(script, transaction, 0, txscript.StandardVerifyFlags, nil, hashes, 1000000, fetcher)
-			allowed := node.mode != "mempool-reject" && err == nil && engine.Execute() == nil
-			fee := int64(1000000)
+			allowed := node.mode != "mempool-reject"
+			for index := range transaction.TxIn {
+				engine, err := txscript.NewEngine(script, transaction, index, txscript.StandardVerifyFlags, nil, hashes, 1000000, fetcher)
+				if err != nil || engine.Execute() != nil {
+					allowed = false
+				}
+			}
+			fee := int64(1000000 * len(transaction.TxIn))
 			for _, output := range transaction.TxOut {
 				fee -= output.Value
 				if output.Value < 0 {
@@ -237,6 +291,9 @@ func newSealRPCFixture(testingContext *testing.T, fixture *sealLifecycleFixture)
 			vsize := (transaction.SerializeSizeStripped()*3 + transaction.SerializeSize() + 3) / 4
 			if node.mode == "fee-mismatch" {
 				fee++
+			}
+			if node.mode == "vsize-mismatch" {
+				vsize = fixture.plan.MaxSignedVBytes + 1
 			}
 			result = []any{map[string]any{"txid": transaction.TxHash().String(), "allowed": allowed, "vsize": vsize, "fees": map[string]any{"base": atomJSON(fee)}}}
 		case "sendrawtransaction":
@@ -279,6 +336,9 @@ func newSealRPCFixture(testingContext *testing.T, fixture *sealLifecycleFixture)
 			view := map[string]any{"txid": fixture.plan.UnsignedTxID, "hex": node.raw}
 			if node.depth > 0 {
 				view["blockhash"], view["confirmations"] = sealB, node.depth
+				if node.mode == "inactive-block" {
+					view["confirmations"] = 0
+				}
 			}
 			result = view
 		case "getblockheader":
@@ -397,6 +457,7 @@ func TestSealPlanV3Controls(testingContext *testing.T) {
 		change     func(*SealPlanRequest)
 	}{
 		{"network", "NETWORK_PIN", func(request *SealPlanRequest) { request.Network = "main" }},
+		{"network-required", "BAD_INPUT", func(request *SealPlanRequest) { request.Network = "" }},
 		{"fee", "SEAL_FEE_CAP", func(request *SealPlanRequest) { request.MaxFeeSat = 1 }},
 		{"rate", "SEAL_FEE_CAP", func(request *SealPlanRequest) { request.MaxFeeRateSatVByte = 1 }},
 		{"outpoint", "SEAL_GRANT_MISMATCH", func(request *SealPlanRequest) { request.AmountSat++ }},
@@ -426,7 +487,7 @@ func TestSealSignRefusals(testingContext *testing.T) {
 			fixture := newSealFixture(testingContext)
 			fixture.planned()
 			fixture.harness.term.answer = answer
-			envelope, code := fixture.harness.run("seal", "sign", "--journal", fixture.path, "--label", kcLabel)
+			envelope, code := fixture.run("seal", "sign", "--journal", fixture.path, "--label", kcLabel)
 			mustRefuse(testingContext, envelope, code, "CONFIRMATION_DECLINED")
 			if fixture.harness.keyRead || fixture.journal().State != "planned" {
 				testingContext.Fatal("declined signing changed state")
@@ -436,12 +497,12 @@ func TestSealSignRefusals(testingContext *testing.T) {
 	fixture := newSealFixture(testingContext)
 	fixture.planned()
 	other := newKC(testingContext, confirmWord)
-	envelope, code := other.run("seal", "sign", "--journal", fixture.path, "--label", kcLabel)
+	envelope, code := other.run(fixture.options("seal", "sign", "--journal", fixture.path, "--label", kcLabel)...)
 	mustRefuse(testingContext, envelope, code, "FUNDING_NOT_OWNED")
 	if other.keyRead {
 		testingContext.Fatal("foreign signer secret read")
 	}
-	envelope, code, _ = runCLI(testingContext, "seal", "sign", "--journal", fixture.path, "--label", kcLabel, "--json")
+	envelope, code, _ = runCLI(testingContext, fixture.options("seal", "sign", "--journal", fixture.path, "--label", kcLabel, "--json")...)
 	mustRefuse(testingContext, envelope, code, "UNSUPPORTED_CAPABILITY")
 }
 
@@ -450,7 +511,8 @@ func TestSealSignRefusals(testingContext *testing.T) {
 func TestSealBroadcastPreflightRefusals(testingContext *testing.T) {
 	cases := []struct{ mode, code string }{
 		{"wrong-network", "WRONG_NETWORK"}, {"missing-input", "SEAL_FUNDING_UNAVAILABLE"},
-		{"decode-mismatch", "PROVIDER_PROTOCOL"}, {"decode-missing-index", "PROVIDER_PROTOCOL"}, {"mempool-reject", "SEAL_MEMPOOL_REJECTED"}, {"fee-mismatch", "SEAL_FEE_CAP"},
+		{"unsynced", "NODE_UNSYNCED"}, {"tip-moved", "SNAPSHOT_CHANGED"},
+		{"decode-mismatch", "PROVIDER_PROTOCOL"}, {"decode-missing-index", "PROVIDER_PROTOCOL"}, {"mempool-reject", "SEAL_MEMPOOL_REJECTED"}, {"fee-mismatch", "SEAL_FEE_CAP"}, {"vsize-mismatch", "SEAL_FEE_CAP"},
 	}
 	for _, test := range cases {
 		testingContext.Run(test.mode, func(testingContext *testing.T) {
@@ -736,11 +798,14 @@ func TestSealObservationRefusalsAndInactiveBlock(testingContext *testing.T) {
 	if fixture.journal().State != "broadcast" || fixture.node.sends != 1 {
 		testingContext.Fatal("unavailable read altered delivery")
 	}
-	fixture.node.mode = "inactive-block"
-	envelope, code = fixture.observe()
-	mustOK(testingContext, envelope, code)
-	if resultAs[SealLifecycleResult](testingContext, envelope).State != "broadcast" || resultAs[SealLifecycleResult](testingContext, envelope).Confirmations != 0 {
-		testingContext.Fatal("inactive block counted toward depth")
+	// Inflated depth is an adversarial control; the other case matches Core.
+	for _, mode := range []string{"inactive-block-inflated-depth", "inactive-block"} {
+		fixture.node.mode = mode
+		envelope, code = fixture.observe()
+		mustOK(testingContext, envelope, code)
+		if resultAs[SealLifecycleResult](testingContext, envelope).State != "broadcast" || resultAs[SealLifecycleResult](testingContext, envelope).Confirmations != 0 {
+			testingContext.Fatal("inactive block counted toward depth")
+		}
 	}
 	fixture.node.mode = ""
 	envelope, code = fixture.observe()

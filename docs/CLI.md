@@ -28,6 +28,11 @@ The auth file contains `username:password` (including the node's cookie format),
 
 The separate `seal plan`, `seal broadcast`, `seal observe` and signer-only
 `swarma-keychain seal sign` interfaces are specified in [SEAL.md](SEAL.md).
+All four require explicit `--network` and an independently supplied
+`--issuer-key`. Network `main` additionally requires both `--allow-mainnet`
+and `--confirm-mainnet MAINNET`; no network is selected by default.
+Funding parents must each have at least one confirmation before preflight
+can record acceptance or a broadcast attempt (`SEAL_FUNDING_UNCONFIRMED`).
 They do not add write permissions to the normal read-only RPC interface.
 
 `node health --config FILE --json` returns `node_id,backend_version,genesis_hash,block_hash,blocks,headers,initial_block_download,verification_progress,connections`. An unsynced node is a valid health observation; name and balance operations refuse it.

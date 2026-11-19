@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/relux-works/swarma-chain-lab/experiments/rental"
 	"github.com/relux-works/swarma-identity/internal/keypolicy"
 )
 
@@ -122,6 +123,12 @@ func (journal *sealJournal) sign(deps keychainDeps, label string) *Failure {
 	}
 	var display strings.Builder
 	fmt.Fprintf(&display, "\n=== GRANT SEAL CREATION ===\n%s\nNetwork: %s (genesis %s)\nFunding key: %s\nLabel: %s\nAccess: %s\nPSBTv0: %s\n", sealSummary(journal.GrantID, &journal.Plan), journal.Request.Network, pinnedGenesis(journal.Request.Network), journal.Request.FundingPubkey, printable(label), access, journal.Plan.PSBTB64)
+	grantBytes, _ := grantBase64(journal.Request.SignedGrantB64)
+	signed, err := rental.ParseSignedGrant(grantBytes)
+	if err != nil {
+		return rentalRefusal(err)
+	}
+	fmt.Fprintf(&display, "Landlord: %s\nAgent: %s\nIssuer key: %s\nSeal pays P2PKH(even-y issuer key).\n", printable(signed.Grant.LandlordName), printable(signed.Grant.AgentName), signed.Grant.IssuerKey)
 	if !inspectable {
 		fmt.Fprintln(&display, "Native ACL flags: unavailable through public Security APIs; authenticated policy metadata is checked before signing.")
 	}

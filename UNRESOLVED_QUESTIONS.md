@@ -1,5 +1,11 @@
 # Open product decisions
 
+- LIP-0017 v0.1.61 leaves C12 versus C8 open: whether the separate contract-seal
+  requirement extends to minimal v3 contracts. The original lifecycle brief
+  negative for a contract without a seal is deferred, not implemented. An owner
+  must explicitly acknowledge that deferral or select the contract construction
+  before a later revision can enforce it. This does not block the existing v3
+  grant seal or change the signed grant format.
 - Seal lifecycle production qualification is pending: real Core mempool policy,
   RPC ACLs/index availability, native funding-key authentication/display, and
   authoritative journal custody must be checked by the operator before use.

@@ -18,6 +18,16 @@ func TestSealLifecyclePlantedControls(testingContext *testing.T) {
 	observer.goCommand(testingContext, "baseline-build", "test", "-mod=readonly", "-p", "1", "-c", "-o", baseline, "./internal/facade")
 	testingContext.Cleanup(func() { os.Remove(baseline) })
 	cases := []struct{ name, file, before, after, test, diagnostic string }{
+		{"no-mainnet-opt-in", "seal_lifecycle.go", "if !allowed {", "if false && !allowed {", "^TestSealMainnetAuthorization$", "want SEAL_MAINNET_OPT_IN_REQUIRED"},
+		{"no-mainnet-confirmation", "seal_lifecycle.go", "if !confirmed || confirmation != \"MAINNET\" {", "if false && (!confirmed || confirmation != \"MAINNET\") {", "^TestSealMainnetAuthorization$", "want SEAL_MAINNET_CONFIRMATION_REQUIRED"},
+		{"no-issuer-pin", "seal_lifecycle.go", "if signed.Grant.IssuerKey != issuer {", "if false && signed.Grant.IssuerKey != issuer {", "^TestSealOperatorIssuerPin$", "want SEAL_ISSUER_MISMATCH"},
+		{"hide-issuer-display", "seal_sign.go", "Issuer key: %s", "Grant key: %s", "^TestSealOperatorIssuerPin$", "issuer display omitted"},
+		{"no-funding-confirmations", "seal_lifecycle.go", "if !member(view, \"confirmations\", &confirmations) || confirmations < 1 {", "if false && (!member(view, \"confirmations\", &confirmations) || confirmations < 1) {", "^TestSealFundingParentConfirmations$", "want SEAL_FUNDING_UNCONFIRMED"},
+		{"zero-funding-confirmations", "seal_lifecycle.go", "confirmations < 1 {", "confirmations < 0 {", "^TestSealFundingParentConfirmations$", "want SEAL_FUNDING_UNCONFIRMED"},
+		{"first-funding-parent-only", "seal_lifecycle.go", "for _, input := range journal.Request.Funding.Inputs {", "for _, input := range journal.Request.Funding.Inputs[:1] {", "^TestSealFundingParentConfirmations$", "want SEAL_FUNDING_UNCONFIRMED"},
+		{"no-decoded-output-script", "seal_lifecycle.go", "output.Script.Hex != want.ScriptHex", "(output.Script.Hex != want.ScriptHex && false)", "^TestSealBroadcastPreflightRefusals$", "want PROVIDER_PROTOCOL"},
+		{"no-acceptance-fee-check", "seal_lifecycle.go", "fee != journal.Plan.FeeSat", "(fee != journal.Plan.FeeSat && false)", "^TestSealBroadcastPreflightRefusals$", "want SEAL_FEE_CAP"},
+		{"no-acceptance-vsize-check", "seal_lifecycle.go", "acceptance[0].VSize > journal.Plan.MaxSignedVBytes", "(acceptance[0].VSize > journal.Plan.MaxSignedVBytes && false)", "^TestSealBroadcastPreflightRefusals$", "want SEAL_FEE_CAP"},
 		{"no-network-pin", "seal_lifecycle.go", "if grant.Network != request.Network || grant.Genesis != pinnedGenesis(request.Network) {", "if false && (grant.Network != request.Network || grant.Genesis != pinnedGenesis(request.Network)) {", "^TestSealPlanV3Controls$", "want NETWORK_PIN"},
 		{"no-funding-owner-pin", "seal_lifecycle.go", "request.Funding.ScriptHex != \"0014\"+hex.EncodeToString(btcutil.Hash160(public))", "(request.Funding.ScriptHex != \"0014\"+hex.EncodeToString(btcutil.Hash160(public)) && false)", "^TestSealPlanV3Controls$", "want FUNDING_NOT_OWNED"},
 		{"no-grant-outpoint-pin", "seal_lifecycle.go", "if grant.Seal.TxID != plan.UnsignedTxID || grant.Seal.Vout != 0 {", "if false && (grant.Seal.TxID != plan.UnsignedTxID || grant.Seal.Vout != 0) {", "^TestSealPlanV3Controls$", "want SEAL_GRANT_MISMATCH"},

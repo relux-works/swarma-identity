@@ -125,14 +125,14 @@ func TestSealPartialSigningKeepsPlannedJournal(testingContext *testing.T) {
 			}
 		}
 	}
-	envelope, code := fixture.harness.run("seal", "sign", "--journal", fixture.path, "--label", kcLabel)
+	envelope, code := fixture.run("seal", "sign", "--journal", fixture.path, "--label", kcLabel)
 	mustRefuse(testingContext, envelope, code, "KEYCHAIN_ERROR")
 	after, err := os.ReadFile(fixture.path)
 	if err != nil || !bytes.Equal(before, after) || fixture.journal().SignedTxHex != "" {
 		testingContext.Fatal("partial signing changed journal")
 	}
 	fixture.harness.store.OnEvent, fixture.harness.store.SecretErr = original, nil
-	envelope, code = fixture.harness.run("seal", "sign", "--journal", fixture.path, "--label", kcLabel)
+	envelope, code = fixture.run("seal", "sign", "--journal", fixture.path, "--label", kcLabel)
 	mustOK(testingContext, envelope, code)
 	if fixture.journal().State != "signed" {
 		testingContext.Fatal("valid signing retry did not advance")
@@ -163,11 +163,11 @@ func TestSealPlanAndSignIdempotent(testingContext *testing.T) {
 	}
 	changed := fixture.request
 	changed.MinConfirmations++
-	envelope, code := fixture.harness.run("seal", "plan", "--request", writeInput(testingContext, changed), "--journal", fixture.path)
+	envelope, code := fixture.run("seal", "plan", "--request", writeInput(testingContext, changed), "--journal", fixture.path)
 	mustRefuse(testingContext, envelope, code, "SEAL_JOURNAL_CONFLICT")
 	fixture.planned()
 	secrets := len(fixture.harness.store.Reasons)
-	envelope, code = fixture.harness.run("seal", "sign", "--journal", fixture.path, "--label", kcLabel)
+	envelope, code = fixture.run("seal", "sign", "--journal", fixture.path, "--label", kcLabel)
 	mustOK(testingContext, envelope, code)
 	after, err := os.ReadFile(fixture.path)
 	if err != nil || !bytes.Equal(before, after) || len(fixture.harness.store.Reasons) != secrets || fixture.journal().State != "signed" {
