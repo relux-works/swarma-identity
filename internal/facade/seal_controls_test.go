@@ -20,6 +20,7 @@ func TestSealLifecyclePlantedControls(testingContext *testing.T) {
 	cases := []struct{ name, file, before, after, test, diagnostic string }{
 		{"no-mainnet-opt-in", "seal_lifecycle.go", "if !allowed {", "if false && !allowed {", "^TestSealMainnetAuthorization$", "want SEAL_MAINNET_OPT_IN_REQUIRED"},
 		{"no-mainnet-confirmation", "seal_lifecycle.go", "if !confirmed || confirmation != \"MAINNET\" {", "if false && (!confirmed || confirmation != \"MAINNET\") {", "^TestSealMainnetAuthorization$", "want SEAL_MAINNET_CONFIRMATION_REQUIRED"},
+		{"no-option-network-binding", "seal_lifecycle.go", "if request.Network != network {", "if false && request.Network != network {", "^TestSealOperatorNetworkPin$", "want NETWORK_PIN"},
 		{"no-issuer-pin", "seal_lifecycle.go", "if signed.Grant.IssuerKey != issuer {", "if false && signed.Grant.IssuerKey != issuer {", "^TestSealOperatorIssuerPin$", "want SEAL_ISSUER_MISMATCH"},
 		{"hide-issuer-display", "seal_sign.go", "Issuer key: %s", "Grant key: %s", "^TestSealOperatorIssuerPin$", "issuer display omitted"},
 		{"no-funding-confirmations", "seal_lifecycle.go", "if !member(view, \"confirmations\", &confirmations) || confirmations < 1 {", "if false && (!member(view, \"confirmations\", &confirmations) || confirmations < 1) {", "^TestSealFundingParentConfirmations$", "want SEAL_FUNDING_UNCONFIRMED"},

@@ -58,6 +58,67 @@ func TestSealMainnetAuthorization(testingContext *testing.T) {
 	mustOK(testingContext, envelope, code)
 }
 
+// Opposite option/request or journal networks refuse before state changes,
+// signing or RPC. Matching controls cover fake mainnet plan/sign and the full
+// regtest lifecycle; the loopback RPC fixture does not model mainnet.
+func TestSealOperatorNetworkPin(testingContext *testing.T) {
+	for _, network := range []string{"main", "regtest"} {
+		testingContext.Run(network, func(testingContext *testing.T) {
+			fixture := newSealFixtureNetwork(testingContext, network)
+			options := func(args []string, selected string) []string {
+				args = append(append([]string{}, args...), "--network", selected, "--issuer-key", fixture.issuer)
+				if selected == "main" {
+					args = append(args, "--allow-mainnet", "--confirm-mainnet", "MAINNET")
+				}
+				return args
+			}
+			mismatch := "regtest"
+			if network == "regtest" {
+				mismatch = "main"
+			}
+			for _, command := range []string{"plan", "sign", "broadcast", "observe"} {
+				testingContext.Run(command, func(testingContext *testing.T) {
+					args := []string{"seal", command, "--journal", fixture.path}
+					switch command {
+					case "plan":
+						args = append(args, "--request", writeInput(testingContext, fixture.request))
+					case "sign":
+						args = append(args, "--label", kcLabel)
+					case "broadcast":
+						args = append(args, "--config", fixture.node.read, "--broadcast-config", fixture.node.write)
+					case "observe":
+						args = append(args, "--config", fixture.node.read)
+					}
+					before, err := os.ReadFile(fixture.path)
+					if (command == "plan" && !os.IsNotExist(err)) || (command != "plan" && err != nil) {
+						testingContext.Fatal("network control journal setup", err)
+					}
+					fixture.harness.keyRead = false
+					fixture.node.mu.Lock()
+					methods, sends := len(fixture.node.methods), fixture.node.sends
+					fixture.node.mu.Unlock()
+					envelope, code := fixture.harness.run(options(args, mismatch)...)
+					mustRefuse(testingContext, envelope, code, "NETWORK_PIN")
+					after, err := os.ReadFile(fixture.path)
+					if (command == "plan" && !os.IsNotExist(err)) || (command != "plan" && err != nil) || !bytes.Equal(before, after) || fixture.harness.keyRead {
+						testingContext.Fatal("network refusal changed journal or read signing key")
+					}
+					fixture.node.mu.Lock()
+					contacted := len(fixture.node.methods) != methods || fixture.node.sends != sends
+					fixture.node.mu.Unlock()
+					if contacted {
+						testingContext.Fatal("network refusal exercised RPC or broadcast")
+					}
+					if command == "plan" || command == "sign" || network == "regtest" {
+						envelope, code = fixture.harness.run(options(args, network)...)
+						mustOK(testingContext, envelope, code)
+					}
+				})
+			}
+		})
+	}
+}
+
 // Only the two independent mainnet acknowledgements pass the authorization
 // parser. This control performs no mainnet plan, signing or RPC operation.
 func TestSealNetworkOptionControls(testingContext *testing.T) {
