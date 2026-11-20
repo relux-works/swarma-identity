@@ -1,5 +1,17 @@
 # Open product decisions
 
+- **L1: STOP:grant-draft-human-landlord.** The requested two-human ceremony
+  uses two landlord names. The current trust draft requires an agent pointing
+  to its landlord and refuses the other landlord as `AGENT_NOT_V3`. `/1` also
+  has Unix windows and a non-authoritative note, not the exact human text and
+  fixed grantor-name expiry block; `/2` does not solve the role/time mismatch.
+  The owner must choose the normative supported profile and fixed-block/text
+  encoding, then deliver the contract/tools and rerun the complete ceremony.
+  Do not substitute agents or estimate an expiry timestamp. Native signer,
+  actual consent client, verifier integration/policy, funding/anchor signer,
+  confirmation floors and revocation remain unqualified. See
+  [L1 evidence and reproduction](docs/LINK-L1-REHEARSAL.md).
+
 - LIP-0017 v0.1.61 leaves C12 versus C8 open: whether the separate contract-seal
   requirement extends to minimal v3 contracts. The original lifecycle brief
   negative for a contract without a seal is deferred, not implemented. An owner

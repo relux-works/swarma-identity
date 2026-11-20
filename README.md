@@ -1,5 +1,20 @@
 # swarma-identity
 
+## L1 ceremony rehearsal and tools
+
+The [L1 real-Core prefix](docs/LINK-L1-REHEARSAL.md) confirms disposable
+regtest seals, then records **STOP:grant-draft-human-landlord**. It is not a
+passing end-to-end ceremony or mainnet qualification. The [mainnet preparation
+runbook](docs/RUNBOOK-MAINNET-GRANT.md) and [consent runbook](docs/RUNBOOK-CONSENT.md)
+preserve that STOP instead of inventing a human-grant contract.
+
+| Tool | Purpose and entry point | Artifacts |
+| --- | --- | --- |
+| Go 1.26.8 | `go test -p 1 -count=1 -v -run '^TestLinkL1' ./internal/facade`; set `L1_REGTEST=1` for actual Core | task-owned `.temp/` HOME/caches/temp and optional `L1_PUBLIC_RESULT` |
+| Python 3 standard library | `python3 -B scripts/rehearse_link_l1.py --network regtest --core-bin "$CORE_BIN" --chain-lab "$L1_CHAIN_LAB" --identity "$IDENTITY" --root "$RUN_ROOT"` | private fixture state and sanitized `public/result.json` under a fresh `.temp/` run root; expected STOP exit 3 |
+| Git / pinned chain-lab harness | HTTPS source checkout and source/hash pin verification; full commands in the L1 guide | source checkout under task scratch |
+| Namecoin Core 28.0 | pinned disposable daemon; reused fullnode-trusts RPC/mining/broadcast helpers; no installed-node discovery | regtest-only wallets, keys and logs in private scratch; never export |
+
 A Swarma module for an agent-facing facade over Namecoin and Nostr. The current CLI implements seven public-data operations and trust-grant issuance with unsigned transaction planning:
 
 - Node health for an explicitly configured loopback Namecoin Core 28.0 node.
