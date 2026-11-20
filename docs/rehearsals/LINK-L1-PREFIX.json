@@ -1,0 +1,84 @@
+{
+  "chain_lab_head": "5d1d02b6f148d441bc9157524c7a7f8c8e215674",
+  "commands": [
+    {
+      "command": "grant seal",
+      "exit_code": 3,
+      "label": "A-wrong-network",
+      "refusal": "NETWORK_PIN"
+    },
+    {
+      "command": "grant seal",
+      "exit_code": 0,
+      "label": "A-seal"
+    },
+    {
+      "command": "grant seal",
+      "exit_code": 3,
+      "label": "B-wrong-network",
+      "refusal": "NETWORK_PIN"
+    },
+    {
+      "command": "grant seal",
+      "exit_code": 0,
+      "label": "B-seal"
+    },
+    {
+      "command": "grant draft",
+      "exit_code": 3,
+      "label": "A-draft-role-probe",
+      "refusal": "AGENT_NOT_V3"
+    },
+    {
+      "command": "grant draft",
+      "exit_code": 3,
+      "label": "B-draft-role-probe",
+      "refusal": "AGENT_NOT_V3"
+    }
+  ],
+  "core_exit_code": 0,
+  "core_reaped": true,
+  "core_sha256": "dc7430676e445af3992430e036f7c1a17bea44f757e9cf25b69205e39625f2f7",
+  "directions": {
+    "A": {
+      "confirmations": 1,
+      "draft_refusal": "AGENT_NOT_V3",
+      "funding_type": "P2WPKH",
+      "issuer_key": "c6f5d89ec14b8b4ec84f7b13fd67715d206aa7d875b15689046a64f82200111c",
+      "landlord_name": "id/l1-a-9d97c4be21ae",
+      "seal": {
+        "txid": "715a7dc82ae7d639d10e512ae7859d638a4c15c99ec71a83f7d0ef339cf956ca",
+        "vout": 0
+      }
+    },
+    "B": {
+      "confirmations": 1,
+      "draft_refusal": "AGENT_NOT_V3",
+      "funding_type": "P2WPKH",
+      "issuer_key": "62055e39bae4d9aa102e8131db38364b63b58b767d8c0fd5ea48ab3f2543e884",
+      "landlord_name": "id/l1-b-9d97c4be21ae",
+      "seal": {
+        "txid": "534234072f95298dce2e67d8aab1a8bf1eb26dbf35284faba48967b9e2bd7329",
+        "vout": 0
+      }
+    }
+  },
+  "identity_sha256": "b5911638b7600d66bcd1b203f88e875e34fcdc60e58f5023e7a8c6158f97a01d",
+  "network": "regtest",
+  "not_run": [
+    "consent",
+    "grant-sign-both-stages",
+    "grant-anchor",
+    "grantcheck-live",
+    "revocation-SEAL_SPENT",
+    "wrong-grantee-key",
+    "unconfirmed-issuance",
+    "tampered-contract-digest",
+    "second-verifier-node",
+    "native-signer",
+    "mainnet"
+  ],
+  "schema": "swarma-identity/link-l1-prefix/1",
+  "script_sha256": "509ee9710d533b4c0192b59658b5ca0e63ec88dc34cb1b4b112bc987779a50f3",
+  "status": "STOP:grant-draft-human-landlord"
+}
